@@ -16,14 +16,16 @@ import queue
 import traceback
 
 class MeteorDetect:
-    def __init__(self, path, output_dir=".", end_time="0600",
-                 minLineLength=30, opencl=False):
+    def __init__(self, path, output_dir=".", end_time="0600", opencl=False):
+
         self.path = path
         # video device url or movie file path
         self.capture = None
         self.opencl = opencl
         self.isfile = os.path.isfile(path)
         self.output_dir = Path(output_dir)
+        self.basename = "%Y%m%d%H%M%S"
+        self.debug = False
 
         # 終了時刻を設定する。
         now = datetime.now()
@@ -36,7 +38,6 @@ class MeteorDetect:
         print("# scheduled end_time = ", self.end_time)
         self.now = now
 
-        self.min_length = minLineLength
         self.image_queue = queue.Queue(maxsize=200)
 
     def __del__(self):
@@ -65,7 +66,7 @@ class MeteorDetect:
         self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         return True
 
-    def start(self, exposure, no_window):
+    def start(self, exposure, min_length, sigma, no_window):
         """
         RTSPストリーミング、及び動画ファイルからの流星の検出(スレッド版)
         """
@@ -78,9 +79,9 @@ class MeteorDetect:
         )
         print("# {} start".format(obs_time))
 
-        th = threading.Thread(target=self.queue_streaming)
+        th = threading.Thread(target=self.queue_frames)
         th.start()
-        self.dequeue_streaming(exposure, no_window)
+        self.detect_meteors(exposure, min_length, sigma, no_window)
         self.stop()
         th.join()
 
@@ -93,10 +94,7 @@ class MeteorDetect:
 
 
     # private:
-    def queue_streaming(self):
-        """RTSP読み込みをthreadで行い、queueにデータを流し込む。
-        """
-        print("# threading version started.")
+    def queue_frames(self):
         frame_count = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
         self._running = True
         while self._running:
@@ -116,109 +114,122 @@ class MeteorDetect:
                 self.connect()
                 time.sleep(5)
 
-        self.image_queue.put(None)
-
-    def dequeue_streaming(self, exposure=1, no_window=False):
-        """queueからデータを読み出し流星検知、描画を行う。
-        """
-        num_frames = int(self.FPS * exposure)
-
-        while True:
-            img_list = []
-            for n in range(num_frames):
-                tf = self.image_queue.get()
-                if tf is None:
-                    break
-                (t, frame) = tf
-                key = chr(cv2.waitKey(1) & 0xFF)
-                if key == 'q':
-                    break
-
-                # exposure time を超えたら終了
-                if len(img_list) == 0:
-                    t0 = t
-                    img_list.append(frame)
-                else:
-                    dt = t - t0
-                    if dt.seconds < exposure:
-                        img_list.append(frame)
-                    else:
-                        break
-            if len(img_list) < num_frames:
-                break
-
-            if len(img_list) > 2:
-                self.composite_img = lighten_composite(img_list)
-                if not no_window:
-                    cv2.imshow('{}'.format(self.path), self.composite_img)
-                self.detect_meteor(img_list)
-
             # ストリーミングの場合、終了時刻を過ぎたなら終了。
             now = datetime.now()
             if not self.isfile and now > self.end_time:
                 print("# end of observation at ", now)
-                self._running = False
-                return
+                break
 
-    def detect_meteor(self, img_list):
-        """img_listで与えられた画像のリストから流星(移動天体)を検出する。
+        self.image_queue.put(None)
+
+    def detect_meteors(self, exposure, min_length, sigma, no_window):
+        """queueからデータを読み出し流星検知、描画を行う。
         """
-        now = datetime.now()
-        obs_time = "{:04}/{:02}/{:02} {:02}:{:02}:{:02}".format(
-            now.year, now.month, now.day, now.hour, now.minute, now.second)
+        while True:
+            tf = self.dequeue_frames(exposure)
+            if tf is None:
+                break
+            (t, frames) = tf
 
-        if len(img_list) > 2:
-            # 差分間で比較明合成を取るために最低3フレームが必要。
-            # 画像のコンポジット(単純スタック)
-            diff_img = lighten_composite(diff_images(img_list, self.mask))
-            try:
-                # if True:
-                if now.hour != self.now.hour:
-                    # 毎時空の様子を記録する。
-                    filename = "sky-{:04}{:02}{:02}{:02}{:02}{:02}".format(
-                        now.year, now.month, now.day, now.hour, now.minute, now.second)
-                    path_name = str(Path(self.output_dir, filename + ".jpg"))
-                    mean_img = average(img_list, self.opencl)
-                    # cv2.imwrite(path_name, self.composite_img)
-                    cv2.imwrite(path_name, mean_img)
-                    self.now = now
+            if not no_window:
+                composite_img = lighten_composite(frames)
+                cv2.imshow('{}'.format(self.path), composite_img)
 
-                detected = detect_meteor_lines(diff_img, self.min_length)
-                if detected is not None:
-                    '''
-                    for meteor_candidate in detected:
-                        print('{} {} A possible meteor was detected.'.format(obs_time, meteor_candidate))
-                    '''
-                    print('{} A possible meteor was detected.'.format(obs_time))
-                    filename = "{:04}{:02}{:02}{:02}{:02}{:02}".format(
-                        now.year, now.month, now.day, now.hour, now.minute, now.second)
-                    path_name = str(Path(self.output_dir, filename + ".jpg"))
-                    cv2.imwrite(path_name, self.composite_img)
+            if not self.isfile and self.debug:
+                monitor_sky(t, frames)
 
-                    # 検出した動画を保存する。
-                    movie_file = str(
-                        Path(self.output_dir, "movie-" + filename + ".mp4"))
-                    self.save_movie(img_list, movie_file)
-            except Exception as e:
-                print(traceback.format_exc())
-                # print(e, file=sys.stderr)
+            detected = self.detect_meteor_lines(frames, min_length, sigma)
+            if detected is not None:
+                # self.detection_log(t)
+                self.save_frames(t, frames)
 
+    # キューから exposure 秒分のフレームをとりだす
+    def dequeue_frames(self, exposure):
+        nframes = round(self.FPS * exposure)
+        frames = []
+        for n in range(nframes):
+            # 'q' キー押下でプログラム終了
+            if chr(cv2.waitKey(1) & 0xFF) == 'q':
+                return None
+
+            tf = self.image_queue.get()
+            # キューから None (EOF) がでてきたらプログラム終了
+            if tf == None:
+                return None
+            (tt, frame) = tf
+            if n == 0:
+                t = tt
+            if self.opencl:
+                frame = cv2.UMat(frame)
+            frames.append(frame)
+        return (t, frames)
+
+    # 毎正時のスカイモニター
+    def monitor_sky(self, t, frames):
+        if now.hour != self.now.hour:
+            filename = "sky-{:04}{:02}{:02}{:02}{:02}{:02}".format(
+                now.year, now.month, now.day, now.hour, now.minute, now.second)
+            path_name = str(Path(self.output_dir, filename + ".jpg"))
+            mean_img = average(img_list, self.opencl)
+            # cv2.imwrite(path_name, composite_img)
+            cv2.imwrite(path_name, mean_img)
+            self.now = now
+
+    # 線分(移動天体)を検出
+    def detect_meteor_lines(self, frames, min_length, sigma):
+        # (1) フレーム間の差をとり、結果を比較明合成
+        diff_img = lighten_composite(diff_images(frames, None))
+
+        # (2) Hough-transform で画像から線分を検出
+        return detect_line_patterns(diff_img, min_length, sigma)
+
+    # 画像・動画の保存
+    def save_frames(self, t, frames):
+        try:
+            basename = t.strftime(self.basename)
+            path_image = str(Path(self.output_dir, basename + ".jpg"))
+            self.save_image(frames, path_image)
+            path_movie = str(Path(self.output_dir, basename + ".mp4"))
+            self.save_movie(frames, path_movie)
+        except Exception as e:
+            print(traceback.format_exc())
+    # 画像リストを画像ファイルとして保存
+    def save_image(self, frames, path):
+        cv2.imwrite(path, lighten_composite(frames))
+    # 画像リストを動画ファイルとして保存
     def save_movie(self, img_list, pathname):
         """
         画像リストから動画を作成する。
-
         Args:
           imt_list: 画像のリスト
           pathname: 出力ファイル名
         """
-        size = (self.WIDTH, self.HEIGHT)
         fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-
-        video = cv2.VideoWriter(pathname, fourcc, self.FPS, size)
+        video = cv2.VideoWriter(pathname, fourcc, self.FPS, self.size())
         for img in img_list:
             video.write(img)
-
         video.release()
+
+    # 検出ログ
+    def detection_log(self, t):
+        ds = self.datetime_str(t)
+        if self.isfile:
+            et = (t - self.file_date).total_seconds()
+            print('M {} {:8.3f}'.format(ds, et))
+        else:
+            print('M {} {}'.format(ds, self.path))
+
+    def datetime_str(self, t):
+        # ミリセカンドまで表示
+        return t.strftime("%Y-%m-%d %H:%M:%S.") + t.strftime("%f")[0:3]
+
+    def local_timezone(self):
+        # ローカルのタイムゾーン: ビルトインな関数がありそうな気がする。
+        time.tzset()
+        tv = int(time.time())
+        zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
+        return timezone(timedelta(seconds=zs))
+
 
 def composite(list_images):
     """画像リストの合成(単純スタッキング)
@@ -299,7 +310,7 @@ def diff_images(img_list, mask):
 
     return diff_list
 
-def detect_meteor_lines(img, min_length):
+def detect_line_patterns(img, min_length, sigma=0):
     """画像上の線状のパターンを流星として検出する。
     Args:
       img: 検出対象となる画像
@@ -308,7 +319,7 @@ def detect_meteor_lines(img, min_length):
       検出結果
     """
     blur_size = (5, 5)
-    blur = cv2.GaussianBlur(img, blur_size, 0)
+    blur = cv2.GaussianBlur(img, blur_size, sigma)
     canny = cv2.Canny(blur, 100, 200, 3)
 
     # The Hough-transform algo:
@@ -316,6 +327,9 @@ def detect_meteor_lines(img, min_length):
         canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
 
 if __name__ == '__main__':
+    import argparse
+    import signal
+
     def main():
         parser = argparse.ArgumentParser(add_help=False)
 
@@ -340,6 +354,8 @@ if __name__ == '__main__':
             '-a', '--area', default=None, help="defined detection area")
         parser.add_argument('--min_length', type=int, default=30,
                             help="minLineLength of HoghLinesP")
+        parser.add_argument('--sigma', type=float, default=0.0,
+                            help="sigma parameter of GaussianBlur()")
 
         parser.add_argument('--opencl',
                             action='store_true',
@@ -372,7 +388,7 @@ if __name__ == '__main__':
             if detector.connect():
                 # 接続先のフレームサイズをもとにマスクを生成
                 detector.mask = make_mask(a.mask, a.area, detector.size())
-                detector.start(a.exposure, a.no_window)
+                detector.start(a.exposure, a.min_length, a.sigma, a.no_window)
         except KeyboardInterrupt:
             detector.stop()
 
