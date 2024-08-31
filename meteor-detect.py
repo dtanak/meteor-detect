@@ -10,35 +10,20 @@ import os
 from datetime import datetime, timedelta, timezone
 import time
 import argparse
-
-# マルチスレッド関係
 import threading
 import queue
 
 import traceback
 
-# 行毎に標準出力のバッファをflushする。
-sys.stdout.reconfigure(line_buffering=True)
-
-# YouTube ライブ配信ソース (変更になった場合は要修正)
-YouTube = {
-    "SDRS6JQulmI": "Kiso",
-    "_8rp1p_tWlc": "Subaru",
-    "ylSiGa_U1UE": "Fukushima",
-    "any_youtube": "YouTube"
-}
-
 class MeteorDetect:
     def __init__(self, path, output_dir=".", end_time="0600",
                  minLineLength=30, opencl=False):
-        self._running = False
+        self.path = path
         # video device url or movie file path
         self.capture = None
         self.opencl = opencl
         self.isfile = os.path.isfile(path)
         self.output_dir = Path(output_dir)
-
-        self.path = path
 
         # 終了時刻を設定する。
         now = datetime.now()
@@ -378,6 +363,9 @@ if __name__ == '__main__':
         # YouTubeの場合、Full HDのビデオストリームURLを使用
         if "youtube" in a.path:
             a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
+
+        # 行毎に標準出力のバッファをflushする。
+        sys.stdout.reconfigure(line_buffering=True)
 
         detector = MeteorDetect(a.path, a.output_dir, a.to, a.min_length)
         try:
