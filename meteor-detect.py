@@ -385,58 +385,48 @@ def detect_meteor_lines(img, min_length):
         canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(add_help=False)
+    def main():
+        parser = argparse.ArgumentParser(add_help=False)
 
-    # ストリーミングモードのオプション
-    parser.add_argument('-u', '--url', default=None,
-                        help='RTSPのURL、または動画(MP4)ファイル')
-    parser.add_argument('-n', '--no_window', action='store_true',
-                        help='画面非表示')
+        # Usage: meteor-detect [options] path
 
-    # 以下はATOM Cam形式のディレクトリからデータを読む場合のオプション
-    parser.add_argument('-d', '--date', default=None,
-                        help="Date in 'yyyymmdd' format (JST)")
-    parser.add_argument('-h', '--hour', default=None,
-                        help="Hour in 'hh' format (JST)")
-    parser.add_argument('-m', '--minute', default=None,
-                        help="minute in mm (optional)")
-    parser.add_argument('-i', '--input', default=None,
-                        help='検出対象のTOPディレクトリ名')
+        # positional argument:
+        parser.add_argument('path', help='stream URL or movie filename')
 
-    # 共通オプション
-    parser.add_argument('-e', '--exposure', type=int,
-                        default=1, help='露出時間(second)')
-    parser.add_argument('-o', '--output', default=None,
-                        help='検出画像の出力先ディレクトリ名')
-    parser.add_argument('-t', '--to', default="0600",
-                        help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
+        # options:
+        parser.add_argument('-n', '--no_window', action='store_true',
+                            help='画面非表示')
+        parser.add_argument('-e', '--exposure', type=int,
+                            default=1, help='露出時間(second)')
+        parser.add_argument('-o', '--output', default=None,
+                            help='検出画像の出力先ディレクトリ名')
+        parser.add_argument('-t', '--to', default="0600",
+                            help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
 
-    parser.add_argument('--mask', default=None, help="mask image")
-    parser.add_argument('--min_length', type=int, default=30,
-                        help="minLineLength of HoghLinesP")
+        parser.add_argument('--mask', default=None, help="mask image")
+        parser.add_argument('--min_length', type=int, default=30,
+                            help="minLineLength of HoghLinesP")
 
-    parser.add_argument('--opencl',
-                        action='store_true',
-                        help="Use OpenCL (default: False)")
+        parser.add_argument('--opencl',
+                            action='store_true',
+                            help="Use OpenCL (default: False)")
 
-    # ffmpeg関係の警告がウザいので抑制する。
-    parser.add_argument('-s', '--suppress-warning',
-                        action='store_true', help='suppress warning messages')
+        # ffmpeg関係の警告がウザいので抑制する。
+        parser.add_argument(
+            '-s', '--suppress-warning', action='store_true',
+            help='suppress warning messages')
 
-    # threadモード(default)
-    parser.add_argument('--thread', default=True,
-                        action='store_true', help='スレッド版(default)')
+        parser.add_argument('--help', action='help',
+                            help='show this help message and exit')
 
-    parser.add_argument('--help', action='help',
-                        help='show this help message and exit')
+        a = parser.parse_args()
 
-    args = parser.parse_args()
+        if a.suppress_warning:
+            # stderrを dev/null に出力する。
+            fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(fd, 2)
 
-    if args.suppress_warning:
-        # stderrを dev/null に出力する。
-        fd = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(fd, 2)
+        detector = MeteorDetect(a.path, a.output, a.to, a.mask, a.min_length)
+        detector.start(a.exposure, a.no_window)
 
-    detector = MeteorDetect(
-        args.url, args.output, args.to, args.mask, args.min_length)
-    detector.start(args.exposure, args.no_window)
+    main()
