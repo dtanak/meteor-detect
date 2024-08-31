@@ -124,9 +124,11 @@ class MeteorDetect:
         return timedelta(seconds=sec, microseconds=micro_sec)
 
     def detect_meteors(self, exposure, min_length, sigma):
-        """queueからデータを読み出し流星検知、描画を行う。
-        """
+        accmframes = [] # 流星出現直前からの累積フレーム
+        postexposures = 0  # 出現後の予備露出数
+        detected_time = None
         while True:
+            # キューから exposure 秒分のフレームを取り出す
             tf = self.dequeue_frames(exposure)
             if tf is None:
                 break
@@ -139,11 +141,29 @@ class MeteorDetect:
             if not self.isfile and self.debug:
                 monitor_sky(t, frames)
 
-            detected = self.detect_meteor_lines(frames, min_length, sigma)
-            if detected is not None:
-                self.detection_log(t)
-                self.save_frames(t, frames)
-                self.dump_detected_lines(t, frames, detected)
+            lines = self.detect_meteor_lines(frames, min_length, sigma)
+            if lines is not None:
+                lines = self.mask_lines(self.mask, lines)
+
+            accmframes += frames
+            if lines is not None:
+                # detected frames          exposure time x 1
+                if self.debug:
+                    self.dump_detected_lines(t, frames, lines)
+                if detected_time is None:
+                    detected_time = t
+                    postexposures = 1
+            elif 0 < postexposures:
+                # post-capture frames      exposure time x 1
+                postexposures -= 1
+            else:
+                # post-capture last frames exposure time x 1
+                if detected_time is not None:
+                    self.detection_log(detected_time)
+                    self.save_frames(detected_time, accmframes)
+                    detected_time = None
+                # pre-capture frames       exposure time x 0.2
+                accmframes = self.last_frames(frames, 0.2)
 
     # キューから exposure 秒分のフレームをとりだす
     def dequeue_frames(self, exposure):
@@ -168,14 +188,17 @@ class MeteorDetect:
 
     # 毎正時のスカイモニター
     def monitor_sky(self, t, frames):
-        if now.hour != self.now.hour:
-            filename = "sky-{:04}{:02}{:02}{:02}{:02}{:02}".format(
-                now.year, now.month, now.day, now.hour, now.minute, now.second)
-            path_name = str(Path(self.output_dir, filename + ".jpg"))
-            mean_img = average(img_list, self.opencl)
-            # cv2.imwrite(path_name, composite_img)
-            cv2.imwrite(path_name, mean_img)
-            self.now = now
+        if not 'prev_monitor_time' in vars(self):
+            self.prev_monitor_time = t
+        if self.prev_monitor_time.hour == t.hour:
+            return
+        self.prev_monitor_time = t
+        basename = t.strftime(self.basename)
+        path = str(pathlib.Path(self.output_dir, basename + ".jpg"))
+        try:
+            cv2.imwrite(path, average(frames, self.opencl))
+        except Exception as e:
+            print(traceback.format_exc())
 
     # 線分(移動天体)を検出
     def detect_meteor_lines(self, frames, min_length, sigma):
@@ -183,9 +206,34 @@ class MeteorDetect:
             return None
         # (1) フレーム間の差をとり、結果を比較明合成
         diff_img = lighten_composite(diff_images(frames, None))
+        # ※ オリジナル版は diff_images の第二引数に mask を与えて、
+        # 画像の一部をマスクしていたが、矩形マスクの縁を直線として
+        # 検出してしまうことがあるため、ロジックを変更した。
 
         # (2) Hough-transform で画像から線分を検出
         return detect_line_patterns(diff_img, min_length, sigma)
+
+    # マスクされた線分を除外
+    def mask_lines(self, mask, lines):
+        r = []
+        for line in lines:
+            xb, yb, xe, ye = line.squeeze()
+            # 始点、終点のどちらかがマスクされていなければ有効とする
+            if self.valid_pos(mask, xb, yb) or \
+               self.valid_pos(mask, xe, ye):
+                r.append(line)
+        if len(r) == 0:
+            return None
+        return r
+
+    # 点x,yがマスクされていないか?
+    def valid_pos(self, mask, x, y):
+        if mask is None:
+            return True
+        pv = mask[y, x]
+        # print(f"{x} {y} {pv}")
+        b, g, r = pv.squeeze()
+        return b == 0 and g == 0 and r == 0
 
     # 検出結果のダンプ。デバッグ用
     def dump_detected_lines(self, t, frames, lines):
@@ -229,6 +277,12 @@ class MeteorDetect:
             xb, yb, xe, ye = line.squeeze()
             diff = cv2.line(diff, (xb, yb), (xe, ye), (0, 255, 255))
         cv2.imwrite(path, diff)
+
+    # フレームのうち後半のfraction(0 〜 1.0)をとりだす
+    def last_frames(self, frames, fraction):
+        n = len(frames)
+        k = int(n * (1 - fraction))
+        return frames[k:]
 
     # 検出ログ
     def detection_log(self, t):
