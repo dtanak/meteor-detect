@@ -17,12 +17,13 @@ class MeteorDetect:
     def __init__(self, path, output_dir=".", end_time="0600", opencl=False):
 
         self.path = path
+        self.isfile = os.path.isfile(path)
         self.capture = None
         self.opencl = opencl
-        self.isfile = os.path.isfile(path)
         self.output_dir = Path(output_dir)
         self.basename = "%Y%m%d%H%M%S"
         self.debug = False
+        self.show_window = False
 
         # 終了時刻を設定する。
         now = datetime.now()
@@ -63,14 +64,14 @@ class MeteorDetect:
             print("")
         return True
 
-    def start(self, exposure, min_length, sigma, no_window):
+    def start(self, exposure, min_length, sigma):
         self.output_dir.mkdir(exist_ok=True)
 
         self.image_queue = queue.Queue(maxsize=200)
         th = threading.Thread(target=self.queue_frames)
         th.start()
 
-        self.detect_meteors(exposure, min_length, sigma, no_window)
+        self.detect_meteors(exposure, min_length, sigma)
         self.stop()
 
         th.join()
@@ -122,7 +123,7 @@ class MeteorDetect:
         micro_sec = int((current_sec - sec) * 1000000)
         return timedelta(seconds=sec, microseconds=micro_sec)
 
-    def detect_meteors(self, exposure, min_length, sigma, no_window):
+    def detect_meteors(self, exposure, min_length, sigma):
         """queueからデータを読み出し流星検知、描画を行う。
         """
         while True:
@@ -131,7 +132,7 @@ class MeteorDetect:
                 break
             (t, frames) = tf
 
-            if not no_window:
+            if self.show_window:
                 composite_img = lighten_composite(frames)
                 cv2.imshow('{}'.format(self.path), composite_img)
 
@@ -377,8 +378,8 @@ if __name__ == '__main__':
         parser.add_argument('path', help='stream URL or movie filename')
 
         # options:
-        parser.add_argument('-n', '--no_window', action='store_true',
-                            help='画面非表示')
+        parser.add_argument('-w', '--show_window', action='store_true',
+                            help='画面表示')
         parser.add_argument('-e', '--exposure', type=int,
                             default=1, help='露出時間(second)')
         parser.add_argument('-o', '--output_dir', default=".",
@@ -394,16 +395,16 @@ if __name__ == '__main__':
                             help="minLineLength of HoghLinesP")
         parser.add_argument('--sigma', type=float, default=0.0,
                             help="sigma parameter of GaussianBlur()")
-
-        parser.add_argument('--opencl',
-                            action='store_true',
-                            help="Use OpenCL (default: False)")
+        parser.add_argument(
+            '--opencl', action='store_true', help="Use OpenCL (default: False)")
 
         # ffmpeg関係の警告がウザいので抑制する。
         parser.add_argument(
             '-s', '--suppress-warning', action='store_true',
             help='suppress warning messages')
 
+        parser.add_argument(
+            '--debug', action='store_true', help='debug mode')
         parser.add_argument('--help', action='help',
                             help='show this help message and exit')
 
@@ -422,11 +423,13 @@ if __name__ == '__main__':
         sys.stdout.reconfigure(line_buffering=True)
 
         detector = MeteorDetect(a.path, a.output_dir, a.to)
+        detector.debug = a.debug
+        detector.show_window = a.show_window
         try:
             if detector.connect():
                 # 接続先のフレームサイズをもとにマスクを生成
                 detector.mask = make_mask(a.mask, a.area, detector.size())
-                detector.start(a.exposure, a.min_length, a.sigma, a.no_window)
+                detector.start(a.exposure, a.min_length, a.sigma)
         except KeyboardInterrupt:
             detector.stop()
 
