@@ -97,7 +97,6 @@ def brightest(img_list):
 
     return output
 
-
 def diff(img_list, mask):
     """画像リストから差分画像のリストを作成する。
 
@@ -131,7 +130,8 @@ def detect(img, min_length):
     canny = cv2.Canny(blur, 100, 200, 3)
 
     # The Hough-transform algo:
-    return cv2.HoughLinesP(canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
+    return cv2.HoughLinesP(
+        canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
 
 
 class AtomCam:
@@ -142,6 +142,7 @@ class AtomCam:
         self.capture = None
         self.source = None
         self.opencl = opencl
+        self.isfile = os.path.isfile(video_url)
 
         # 入力ソースの判定
         if "youtube" in video_url:
@@ -156,10 +157,12 @@ class AtomCam:
         self.url = video_url
 
         self.connect()
-        # opencv-python 4.6.0.66 のバグで大きな値(9000)が返ることがあるので対策。
-        self.FPS = min(int(self.capture.get(cv2.CAP_PROP_FPS)), 60)
+
+        self.FPS = min(self.capture.get(cv2.CAP_PROP_FPS), 60)
+        # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
+
         self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.WIDTH = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
 
         # 出力先ディレクトリ
         if output:
@@ -168,9 +171,6 @@ class AtomCam:
         else:
             output_dir = Path('.')
         self.output_dir = output_dir
-
-        # MP4ファイル再生の場合を区別する。
-        self.mp4 = Path(video_url).suffix == '.mp4'
 
         # 終了時刻を設定する。
         now = datetime.now()
@@ -247,31 +247,24 @@ class AtomCam:
         print("# threading version started.")
         frame_count = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
         self._running = True
-        while(True):
-            try:
-                ret, frame = self.capture.read()
-                if self.opencl:
-                    frame = cv2.UMat(frame)
-                if ret:
-                    # self.image_queue.put_nowait(frame)
-                    now = datetime.now()
-                    self.image_queue.put((now, frame))
-                    if self.mp4:
-                        current_pos = int(self.capture.get(
-                            cv2.CAP_PROP_POS_FRAMES))
-                        if current_pos >= frame_count:
-                            break
-                else:
-                    self.connect()
-                    time.sleep(5)
-                    continue
+        while self._running:
+            ret, frame = self.capture.read()
+            if self.opencl:
+                frame = cv2.UMat(frame)
+            if ret:
+                # self.image_queue.put_nowait(frame)
+                now = datetime.now()
+                self.image_queue.put((now, frame))
+                if self.isfile:
+                    current_pos = int(self.capture.get(
+                        cv2.CAP_PROP_POS_FRAMES))
+                    if current_pos >= frame_count:
+                        break
+            else:
+                self.connect()
+                time.sleep(5)
 
-                if self._running is False:
-                    break
-            except Exception as e:
-                print(type(e), file=sys.stderr)
-                print(e, file=sys.stderr)
-                continue
+        self.image_queue.put(None)
 
     def dequeue_streaming(self, exposure=1, no_window=False):
         """queueからデータを読み出し流星検知、描画を行う。
@@ -281,15 +274,13 @@ class AtomCam:
         while True:
             img_list = []
             for n in range(num_frames):
-                (t, frame) = self.image_queue.get()
+                tf = self.image_queue.get()
+                if tf is None:
+                    break
+                (t, frame) = tf
                 key = chr(cv2.waitKey(1) & 0xFF)
                 if key == 'q':
-                    self._running = False
-                    return
-
-                if self.mp4 and self.image_queue.empty():
-                    self._running = False
-                    return
+                    break
 
                 # exposure time を超えたら終了
                 if len(img_list) == 0:
@@ -301,6 +292,8 @@ class AtomCam:
                         img_list.append(frame)
                     else:
                         break
+            if len(img_list) < num_frames:
+                break
 
             if len(img_list) > 2:
                 self.composite_img = brightest(img_list)
@@ -310,7 +303,7 @@ class AtomCam:
 
             # ストリーミングの場合、終了時刻を過ぎたなら終了。
             now = datetime.now()
-            if not self.mp4 and now > self.end_time:
+            if not self.isfile and now > self.end_time:
                 print("# end of observation at ", now)
                 self._running = False
                 return
@@ -409,6 +402,7 @@ def streaming_thread(args):
 
     try:
         atom.dequeue_streaming(args.exposure, args.no_window)
+        atom.stop()
     except KeyboardInterrupt:
         atom.stop()
 
@@ -422,7 +416,8 @@ if __name__ == '__main__':
     # ストリーミングモードのオプション
     parser.add_argument('-u', '--url', default=None,
                         help='RTSPのURL、または動画(MP4)ファイル')
-    parser.add_argument('-n', '--no_window', action='store_true', help='画面非表示')
+    parser.add_argument('-n', '--no_window', action='store_true',
+                        help='画面非表示')
 
     # 以下はATOM Cam形式のディレクトリからデータを読む場合のオプション
     parser.add_argument('-d', '--date', default=None,
@@ -431,12 +426,14 @@ if __name__ == '__main__':
                         help="Hour in 'hh' format (JST)")
     parser.add_argument('-m', '--minute', default=None,
                         help="minute in mm (optional)")
-    parser.add_argument('-i', '--input', default=None, help='検出対象のTOPディレクトリ名')
+    parser.add_argument('-i', '--input', default=None,
+                        help='検出対象のTOPディレクトリ名')
 
     # 共通オプション
     parser.add_argument('-e', '--exposure', type=int,
                         default=1, help='露出時間(second)')
-    parser.add_argument('-o', '--output', default=None, help='検出画像の出力先ディレクトリ名')
+    parser.add_argument('-o', '--output', default=None,
+                        help='検出画像の出力先ディレクトリ名')
     parser.add_argument('-t', '--to', default="0600",
                         help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
 
@@ -445,7 +442,8 @@ if __name__ == '__main__':
                         help="minLineLength of HoghLinesP")
 
     parser.add_argument('--opencl',
-                        action='store_true', help="Use OpenCL (default: False)")
+                        action='store_true',
+                        help="Use OpenCL (default: False)")
 
     # ffmpeg関係の警告がウザいので抑制する。
     parser.add_argument('-s', '--suppress-warning',
@@ -460,9 +458,11 @@ if __name__ == '__main__':
 
     # 以下のオプションはatomcam_toolsを必要とする。
     parser.add_argument(
-        '--atomcam_tools', action='store_true', help='atomcam_toolsを使う場合に指定する。')
+        '--atomcam_tools', action='store_true',
+        help='atomcam_toolsを使う場合に指定する。')
     parser.add_argument(
-        '-c', '--clock', action='store_true', help='カメラの時刻チェック(atomcam_tools必要)')
+        '-c', '--clock', action='store_true',
+        help='カメラの時刻チェック(atomcam_tools必要)')
 
     args = parser.parse_args()
 
