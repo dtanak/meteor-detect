@@ -459,6 +459,13 @@ if __name__ == '__main__':
         if "youtube" in a.path:
             a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
 
+        # HUP シグナルを受信したら終了
+        def signal_receptor(signum, frame):
+            a.re_connect = False
+            detector.stop()
+
+        signal.signal(signal.SIGHUP, signal_receptor)
+
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
 
