@@ -10,11 +10,6 @@ import os
 from datetime import datetime, timedelta, timezone
 import time
 import argparse
-try:
-    import apafy as pafy
-except Exception:
-    # pafyを使う場合はpacheが必要。
-    import pafy
 
 # マルチスレッド関係
 import threading
@@ -34,42 +29,27 @@ YouTube = {
 }
 
 class MeteorDetect:
-    def __init__(self, video_url, output=None, end_time="0600",
+    def __init__(self, path, output_dir=".", end_time="0600",
                  mask=None, minLineLength=30, opencl=False):
         self._running = False
         # video device url or movie file path
         self.capture = None
         self.source = None
         self.opencl = opencl
-        self.isfile = os.path.isfile(video_url)
+        self.isfile = os.path.isfile(path)
+        self.output_dir = Path(output_dir)
 
         # 入力ソースの判定
-        if "youtube" in video_url:
+        if "youtube" in path:
             # YouTube(マウナケア、木曽、福島、etc)
             self.source = "YouTube"
             for source in YouTube.keys():
-                if source in video_url:
+                if source in path:
                     self.source = YouTube[source]
         else:
             self.source = "ATOMCam"
 
-        self.url = video_url
-
-        self.connect()
-
-        self.FPS = min(self.capture.get(cv2.CAP_PROP_FPS), 60)
-        # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
-
-        self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-
-        # 出力先ディレクトリ
-        if output:
-            output_dir = Path(output)
-            output_dir.mkdir(exist_ok=True)
-        else:
-            output_dir = Path('.')
-        self.output_dir = output_dir
+        self.path = path
 
         # 終了時刻を設定する。
         now = datetime.now()
@@ -122,23 +102,23 @@ class MeteorDetect:
         if self.capture:
             self.capture.release()
 
-        if self.source in YouTube.values():
-            # YouTubeからのストリーミング入力
-            video = pafy.new(self.url)
-            best = video.getbest(preftype="mp4")
-            url = best.url
-        else:
-            url = self.url
+        self.capture = cv2.VideoCapture(self.path)
+        if not self.capture.isOpened():
+            return False
 
-        self.capture = cv2.VideoCapture(url)
+        self.FPS = min(self.capture.get(cv2.CAP_PROP_FPS), 60)
+        # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
+
+        self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        return True
 
     def start(self, exposure, no_window):
         """
         RTSPストリーミング、及び動画ファイルからの流星の検出(スレッド版)
         """
 
-        if not self.capture.isOpened():
-            return
+        self.output_dir.mkdir(exist_ok=True)
 
         now = datetime.now()
         obs_time = "{:04}/{:02}/{:02} {:02}:{:02}:{:02}".format(
@@ -146,22 +126,18 @@ class MeteorDetect:
         )
         print("# {} start".format(obs_time))
 
-        # スレッド版の流星検出
         th = threading.Thread(target=self.queue_streaming)
         th.start()
-
-        try:
-            self.dequeue_streaming(exposure, no_window)
-            self.stop()
-        except KeyboardInterrupt:
-            self.stop()
-
+        self.dequeue_streaming(exposure, no_window)
+        self.stop()
         th.join()
 
     def stop(self):
         # thread を止める
         self._running = False
 
+
+    # private:
     def queue_streaming(self):
         """RTSP読み込みをthreadで行い、queueにデータを流し込む。
         """
@@ -398,7 +374,7 @@ if __name__ == '__main__':
                             help='画面非表示')
         parser.add_argument('-e', '--exposure', type=int,
                             default=1, help='露出時間(second)')
-        parser.add_argument('-o', '--output', default=None,
+        parser.add_argument('-o', '--output_dir', default=".",
                             help='検出画像の出力先ディレクトリ名')
         parser.add_argument('-t', '--to', default="0600",
                             help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
@@ -426,7 +402,44 @@ if __name__ == '__main__':
             fd = os.open(os.devnull, os.O_WRONLY)
             os.dup2(fd, 2)
 
-        detector = MeteorDetect(a.path, a.output, a.to, a.mask, a.min_length)
-        detector.start(a.exposure, a.no_window)
+        # YouTubeの場合、Full HDのビデオストリームURLを使用
+        if "youtube" in a.path:
+            a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
+
+        detector = MeteorDetect(a.path, a.output_dir,
+                                a.to, a.mask, a.min_length)
+        try:
+            if detector.connect():
+                detector.start(a.exposure, a.no_window)
+        except KeyboardInterrupt:
+            detector.stop()
+
+
+    # YouTubeのビデオストリームURLの取得
+    def get_youtube_stream(u, property):
+        try:
+            import apafy as pafy
+        except Exception:
+            # pafyを使う場合はpacheが必要。
+            import pafy
+
+        print(f"# connecting to YouTube: {u}")
+
+        for retry in range(10):
+            try:
+                video = pafy.new(u, ydl_opts={'nocheckcertificate': True})
+            except Exception as e:
+                print(str(e))
+                traceback.print_exc(file=sys.stdout)
+                sys.exit(1)
+            # video = pafy.new(u)
+            # best = video.getbest(preftype="mp4")
+            for v in video.videostreams:
+                if str(v) == property:
+                    return v.url
+            print(f"# retrying to connect to YouTube: {retry}")
+            time.sleep(2)
+        print(f"# {u}: retry count exceeded, exit.")
+        sys.exit(1)
 
     main()
