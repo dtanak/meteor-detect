@@ -34,20 +34,9 @@ class MeteorDetect:
         self._running = False
         # video device url or movie file path
         self.capture = None
-        self.source = None
         self.opencl = opencl
         self.isfile = os.path.isfile(path)
         self.output_dir = Path(output_dir)
-
-        # 入力ソースの判定
-        if "youtube" in path:
-            # YouTube(マウナケア、木曽、福島、etc)
-            self.source = "YouTube"
-            for source in YouTube.keys():
-                if source in path:
-                    self.source = YouTube[source]
-        else:
-            self.source = "ATOMCam"
 
         self.path = path
 
@@ -176,7 +165,7 @@ class MeteorDetect:
             if len(img_list) > 2:
                 self.composite_img = lighten_composite(img_list)
                 if not no_window:
-                    cv2.imshow('{}'.format(self.source), self.composite_img)
+                    cv2.imshow('{}'.format(self.path), self.composite_img)
                 self.detect_meteor(img_list)
 
             # ストリーミングの場合、終了時刻を過ぎたなら終了。
