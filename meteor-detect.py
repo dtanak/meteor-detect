@@ -14,26 +14,16 @@ import queue
 import traceback
 
 class MeteorDetect:
-    def __init__(self, path, output_dir=".", end_time="0600", opencl=False):
-
+    def __init__(self, path):
         self.path = path
         self.isfile = os.path.isfile(path)
+        self.opencl = False
         self.capture = None
-        self.opencl = opencl
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(".")
         self.basename = "%Y%m%d%H%M%S"
         self.debug = False
         self.show_window = False
-
-        # 終了時刻を設定する。
-        now = datetime.now()
-        t = datetime.strptime(end_time, "%H%M")
-        self.end_time = datetime(
-            now.year, now.month, now.day, t.hour, t.minute)
-        if now > self.end_time:
-            self.end_time = self.end_time + timedelta(hours=24)
-        print("# scheduled end_time = ", self.end_time)
-        self.now = now
+        self.time_to = None
 
     def __del__(self):
         if self.capture:
@@ -100,19 +90,15 @@ class MeteorDetect:
             r, frame = self.capture.read()
             if not r: # EOF or lost connection
                 break
+            if not self.isfile and self.time_to is not None:
+                if self.time_to < t:
+                    break
             if self.isfile:
                 cp = self.capture.get(cv2.CAP_PROP_POS_FRAMES)
                 t = self.file_date + self.elapsed_time(cp)
             else:
                 t = datetime.now(tz)
             self.image_queue.put((t, frame))
-
-            # ストリーミングの場合、終了時刻を過ぎたなら終了。
-            now = datetime.now()
-            if not self.isfile and now > self.end_time:
-                print("# end of observation at ", now)
-                break
-
         self.image_queue.put(None)
         print("# {} stop".format(self.datetime_str(t)))
 
@@ -139,7 +125,7 @@ class MeteorDetect:
                 cv2.imshow('{}'.format(self.path), composite_img)
 
             if not self.isfile and self.debug:
-                monitor_sky(t, frames)
+                self.monitor_sky(t, frames)
 
             lines = self.detect_meteor_lines(frames, min_length, sigma)
             if lines is not None:
@@ -434,13 +420,14 @@ if __name__ == '__main__':
         # options:
         parser.add_argument('-w', '--show_window', action='store_true',
                             help='画面表示')
+        parser.add_argument('-r', '--re_connect', action='store_true',
+                            help='try to re-connect when lost connection')
         parser.add_argument('-e', '--exposure', type=int,
                             default=1, help='露出時間(second)')
         parser.add_argument('-o', '--output_dir', default=".",
                             help='検出画像の出力先ディレクトリ名')
-        parser.add_argument('-t', '--to', default="0600",
-                            help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
-
+        parser.add_argument('-b', '--basename', default="%Y%m%d%H%M%S",
+                            help="basename of output in strftime format")
         parser.add_argument(
             '-m', '--mask', default=None, help="mask image")
         parser.add_argument(
@@ -476,17 +463,22 @@ if __name__ == '__main__':
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
 
-        detector = MeteorDetect(a.path, a.output_dir, a.to)
+        detector = MeteorDetect(a.path)
         detector.debug = a.debug
         detector.show_window = a.show_window
+        detector.basename = a.basename
+        detector.output_dir = Path(a.output_dir)
         try:
-            if detector.connect():
-                # 接続先のフレームサイズをもとにマスクを生成
-                detector.mask = make_mask(a.mask, a.area, detector.size())
-                detector.start(a.exposure, a.min_length, a.sigma)
+            while True:
+                if detector.connect():
+                    # 接続先のフレームサイズをもとにマスクを生成
+                    detector.mask = make_mask(a.mask, a.area, detector.size())
+                    detector.start(a.exposure, a.min_length, a.sigma)
+                if not a.re_connect or detector.isfile:
+                    break
+                time.sleep(5)
         except KeyboardInterrupt:
             detector.stop()
-
 
     # マスク領域と検出領域を合成
     def make_mask(mask, area, size):
