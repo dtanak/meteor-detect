@@ -25,10 +25,6 @@ import traceback
 # 行毎に標準出力のバッファをflushする。
 sys.stdout.reconfigure(line_buffering=True)
 
-# 自分の環境のATOM CamのIPに修正してください。
-ATOM_CAM_IP = os.environ.get("ATOM_CAM_IP", "192.168.2.110")
-ATOM_CAM_RTSP = "rtsp://{}:8554/unicast".format(ATOM_CAM_IP)
-
 # YouTube ライブ配信ソース (変更になった場合は要修正)
 YouTube = {
     "SDRS6JQulmI": "Kiso",
@@ -38,8 +34,8 @@ YouTube = {
 }
 
 class MeteorDetect:
-    def __init__(self, video_url=ATOM_CAM_RTSP, output=None, end_time="0600",
-                 clock=False, mask=None, minLineLength=30, opencl=False):
+    def __init__(self, video_url, output=None, end_time="0600",
+                 mask=None, minLineLength=30, opencl=False):
         self._running = False
         # video device url or movie file path
         self.capture = None
@@ -85,10 +81,6 @@ class MeteorDetect:
 
         print("# scheduled end_time = ", self.end_time)
         self.now = now
-
-        if self.source == "ATOMCam" and clock:
-            # 内蔵時計のチェック
-            check_clock()
 
         if mask:
             # マスク画像指定の場合
@@ -139,6 +131,32 @@ class MeteorDetect:
             url = self.url
 
         self.capture = cv2.VideoCapture(url)
+
+    def start(self, exposure, no_window):
+        """
+        RTSPストリーミング、及び動画ファイルからの流星の検出(スレッド版)
+        """
+
+        if not self.capture.isOpened():
+            return
+
+        now = datetime.now()
+        obs_time = "{:04}/{:02}/{:02} {:02}:{:02}:{:02}".format(
+            now.year, now.month, now.day, now.hour, now.minute, now.second
+        )
+        print("# {} start".format(obs_time))
+
+        # スレッド版の流星検出
+        th = threading.Thread(target=self.queue_streaming)
+        th.start()
+
+        try:
+            self.dequeue_streaming(exposure, no_window)
+            self.stop()
+        except KeyboardInterrupt:
+            self.stop()
+
+        th.join()
 
     def stop(self):
         # thread を止める
@@ -271,47 +289,6 @@ class MeteorDetect:
 
         video.release()
 
-def streaming_thread(args):
-    """
-    RTSPストリーミング、及び動画ファイルからの流星の検出(スレッド版)
-    """
-    if args.url:
-        # URL指定の場合。
-        url = args.url
-    else:
-        # defaultはATOMCamのURL(atomcam_tools版)とする。
-        if args.atomcam_tools:
-            # atomcam_toolsのRTSPを使う場合。
-            url = f"rtsp://{ATOM_CAM_IP}:8554/unicast"
-        else:
-            # メーカ公式のRTSPを使う場合
-            url = f"rtsp://6199:4003@{ATOM_CAM_IP}/live"
-
-    # print(url)
-    atom = MeteorDetect(url, args.output, args.to, args.clock,
-                   args.mask, args.min_length)
-    if not atom.capture.isOpened():
-        return
-
-    now = datetime.now()
-    obs_time = "{:04}/{:02}/{:02} {:02}:{:02}:{:02}".format(
-        now.year, now.month, now.day, now.hour, now.minute, now.second
-    )
-    print("# {} start".format(obs_time))
-
-    # スレッド版の流星検出
-    t_in = threading.Thread(target=atom.queue_streaming)
-    t_in.start()
-
-    try:
-        atom.dequeue_streaming(args.exposure, args.no_window)
-        atom.stop()
-    except KeyboardInterrupt:
-        atom.stop()
-
-    t_in.join()
-    return
-
 def composite(list_images):
     """画像リストの合成(単純スタッキング)
 
@@ -407,8 +384,6 @@ def detect_meteor_lines(img, min_length):
     return cv2.HoughLinesP(
         canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
 
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=False)
 
@@ -455,14 +430,6 @@ if __name__ == '__main__':
     parser.add_argument('--help', action='help',
                         help='show this help message and exit')
 
-    # 以下のオプションはatomcam_toolsを必要とする。
-    parser.add_argument(
-        '--atomcam_tools', action='store_true',
-        help='atomcam_toolsを使う場合に指定する。')
-    parser.add_argument(
-        '-c', '--clock', action='store_true',
-        help='カメラの時刻チェック(atomcam_tools必要)')
-
     args = parser.parse_args()
 
     if args.suppress_warning:
@@ -470,9 +437,6 @@ if __name__ == '__main__':
         fd = os.open(os.devnull, os.O_WRONLY)
         os.dup2(fd, 2)
 
-    if args.date:
-        # 日付がある場合はファイル(ATOMCam形式のファイル)から流星検出
-        detect_meteor(args)
-    else:
-        # ストリーミング/動画(MP4)の再生、流星検出
-        streaming_thread(args)
+    detector = MeteorDetect(
+        args.url, args.output, args.to, args.mask, args.min_length)
+    detector.start(args.exposure, args.no_window)
