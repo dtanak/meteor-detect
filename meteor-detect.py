@@ -2,24 +2,21 @@
 
 import numpy as np
 import cv2
-from imutils.video import FileVideoStream
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import sys
 import os
-from datetime import datetime, timedelta, timezone
 import time
 import argparse
 import threading
 import queue
-
 import traceback
 
 class MeteorDetect:
     def __init__(self, path, output_dir=".", end_time="0600", opencl=False):
 
         self.path = path
-        # video device url or movie file path
         self.capture = None
         self.opencl = opencl
         self.isfile = os.path.isfile(path)
@@ -34,19 +31,10 @@ class MeteorDetect:
             now.year, now.month, now.day, t.hour, t.minute)
         if now > self.end_time:
             self.end_time = self.end_time + timedelta(hours=24)
-
         print("# scheduled end_time = ", self.end_time)
         self.now = now
 
-        self.image_queue = queue.Queue(maxsize=200)
-
     def __del__(self):
-        now = datetime.now()
-        obs_time = "{:04}/{:02}/{:02} {:02}:{:02}:{:02}".format(
-            now.year, now.month, now.day, now.hour, now.minute, now.second
-        )
-        print("# {} stop".format(obs_time))
-
         if self.capture:
             self.capture.release()
         cv2.destroyAllWindows()
@@ -64,29 +52,33 @@ class MeteorDetect:
 
         self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        print(f"# {self.path}: ", end="")
+        print(f"{self.WIDTH}x{self.HEIGHT}, {self.FPS:.3f} fps", end="")
+
+        if self.isfile:
+            total_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            total_time = total_frames / self.FPS
+            print(f", {total_frames} frames, {total_time:.1f} sec")
+        else:
+            print("")
         return True
 
     def start(self, exposure, min_length, sigma, no_window):
-        """
-        RTSPストリーミング、及び動画ファイルからの流星の検出(スレッド版)
-        """
-
         self.output_dir.mkdir(exist_ok=True)
 
-        now = datetime.now()
-        obs_time = "{:04}/{:02}/{:02} {:02}:{:02}:{:02}".format(
-            now.year, now.month, now.day, now.hour, now.minute, now.second
-        )
-        print("# {} start".format(obs_time))
-
+        self.image_queue = queue.Queue(maxsize=200)
         th = threading.Thread(target=self.queue_frames)
         th.start()
+
         self.detect_meteors(exposure, min_length, sigma, no_window)
         self.stop()
+
         th.join()
 
     def stop(self):
-        # thread を止める
+        if self.image_queue:
+            while not self.image_queue.empty():
+                self.image_queue.get()
         self._running = False
 
     def size(self):
@@ -95,24 +87,24 @@ class MeteorDetect:
 
     # private:
     def queue_frames(self):
-        frame_count = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        tz = self.local_timezone()
+
+        if self.isfile:
+            t = self.file_date = find_file_date(self.path).astimezone(tz)
+        else:
+            t = datetime.now(tz)
+        print("# {} start".format(self.datetime_str(t)))
         self._running = True
         while self._running:
-            ret, frame = self.capture.read()
-            if self.opencl:
-                frame = cv2.UMat(frame)
-            if ret:
-                # self.image_queue.put_nowait(frame)
-                now = datetime.now()
-                self.image_queue.put((now, frame))
-                if self.isfile:
-                    current_pos = int(self.capture.get(
-                        cv2.CAP_PROP_POS_FRAMES))
-                    if current_pos >= frame_count:
-                        break
+            r, frame = self.capture.read()
+            if not r: # EOF or lost connection
+                break
+            if self.isfile:
+                cp = self.capture.get(cv2.CAP_PROP_POS_FRAMES)
+                t = self.file_date + self.elapsed_time(cp)
             else:
-                self.connect()
-                time.sleep(5)
+                t = datetime.now(tz)
+            self.image_queue.put((t, frame))
 
             # ストリーミングの場合、終了時刻を過ぎたなら終了。
             now = datetime.now()
@@ -121,6 +113,14 @@ class MeteorDetect:
                 break
 
         self.image_queue.put(None)
+        print("# {} stop".format(self.datetime_str(t)))
+
+    # ファイル先頭からの経過時間
+    def elapsed_time(self, current_pos):
+        current_sec = current_pos / self.FPS
+        sec = int(current_sec)
+        micro_sec = int((current_sec - sec) * 1000000)
+        return timedelta(seconds=sec, microseconds=micro_sec)
 
     def detect_meteors(self, exposure, min_length, sigma, no_window):
         """queueからデータを読み出し流星検知、描画を行う。
@@ -140,8 +140,9 @@ class MeteorDetect:
 
             detected = self.detect_meteor_lines(frames, min_length, sigma)
             if detected is not None:
-                # self.detection_log(t)
+                self.detection_log(t)
                 self.save_frames(t, frames)
+                self.dump_detected_lines(t, frames, detected)
 
     # キューから exposure 秒分のフレームをとりだす
     def dequeue_frames(self, exposure):
@@ -177,11 +178,22 @@ class MeteorDetect:
 
     # 線分(移動天体)を検出
     def detect_meteor_lines(self, frames, min_length, sigma):
+        if len(frames) <= 2:
+            return None
         # (1) フレーム間の差をとり、結果を比較明合成
         diff_img = lighten_composite(diff_images(frames, None))
 
         # (2) Hough-transform で画像から線分を検出
         return detect_line_patterns(diff_img, min_length, sigma)
+
+    # 検出結果のダンプ。デバッグ用
+    def dump_detected_lines(self, t, frames, lines):
+        print("D {} {} lines:".format(self.datetime_str(t), len(lines)))
+        for meteor_candidate in lines:
+            print('D  {}'.format(meteor_candidate))
+        basename = t.strftime(self.basename)
+        path_diffs = str(Path(self.output_dir, basename + "_d.jpg"))
+        self.save_diffs(frames, path_diffs, lines)
 
     # 画像・動画の保存
     def save_frames(self, t, frames):
@@ -209,6 +221,13 @@ class MeteorDetect:
         for img in img_list:
             video.write(img)
         video.release()
+    # 検出結果を画像として保存
+    def save_diffs(self, frames, path, lines):
+        diff = lighten_composite(diff_images(frames, None))
+        for line in lines:
+            xb, yb, xe, ye = line.squeeze()
+            diff = cv2.line(diff, (xb, yb), (xe, ye), (0, 255, 255))
+        cv2.imwrite(path, diff)
 
     # 検出ログ
     def detection_log(self, t):
@@ -230,6 +249,25 @@ class MeteorDetect:
         zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
         return timezone(timedelta(seconds=zs))
 
+def find_file_date(u):
+    try:
+        date = mpeg_date(u)
+        # Python 3.9の fromisoformat は"Z" timezoneで例外を起こす。
+        date = date.replace('Z', '+00:00')
+        return datetime.fromisoformat(date)
+    except Exception as e:
+        return datetime.fromisoformat("2001-01-01T00:00:00+00:00")
+
+def mpeg_date(path):
+    import subprocess
+    import re
+
+    # ffmpegコマンドを使い動画ファイルの creation_time を取得
+    p = subprocess.run(["ffmpeg", "-i", path], capture_output=True, text=True)
+    for t in p.stderr.split("\n"):
+        if "creation_time" in t:
+            return re.sub('.*creation_time *: *', '', t)
+    return None
 
 def composite(list_images):
     """画像リストの合成(単純スタッキング)
@@ -383,7 +421,7 @@ if __name__ == '__main__':
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
 
-        detector = MeteorDetect(a.path, a.output_dir, a.to, a.min_length)
+        detector = MeteorDetect(a.path, a.output_dir, a.to)
         try:
             if detector.connect():
                 # 接続先のフレームサイズをもとにマスクを生成
