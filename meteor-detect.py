@@ -30,7 +30,7 @@ YouTube = {
 
 class MeteorDetect:
     def __init__(self, path, output_dir=".", end_time="0600",
-                 mask=None, minLineLength=30, opencl=False):
+                 minLineLength=30, opencl=False):
         self._running = False
         # video device url or movie file path
         self.capture = None
@@ -61,28 +61,6 @@ class MeteorDetect:
 
         print("# scheduled end_time = ", self.end_time)
         self.now = now
-
-        if mask:
-            # マスク画像指定の場合
-            self.mask = cv2.imread(mask)
-        else:
-            # 時刻表示部分のマスクを作成
-            if self.opencl:
-                zero = cv2.UMat((1080, 1920), cv2.CV_8UC3)
-            else:
-                zero = np.zeros((1080, 1920, 3), np.uint8)
-
-            if self.source == "Subaru":
-                # mask SUBRU/Mauna-Kea timestamp
-                self.mask = cv2.rectangle(
-                    zero, (1660, 980), (1920, 1080), (255, 255, 255), -1)
-            elif self.source == "YouTube":
-                # no mask
-                self.mask = None
-            else:
-                # mask ATOM Cam timestamp
-                self.mask = cv2.rectangle(
-                    zero, (1390, 1010), (1920, 1080), (255, 255, 255), -1)
 
         self.min_length = minLineLength
         self.image_queue = queue.Queue(maxsize=200)
@@ -135,6 +113,9 @@ class MeteorDetect:
     def stop(self):
         # thread を止める
         self._running = False
+
+    def size(self):
+        return (self.WIDTH, self.HEIGHT)
 
 
     # private:
@@ -379,7 +360,10 @@ if __name__ == '__main__':
         parser.add_argument('-t', '--to', default="0600",
                             help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
 
-        parser.add_argument('--mask', default=None, help="mask image")
+        parser.add_argument(
+            '-m', '--mask', default=None, help="mask image")
+        parser.add_argument(
+            '-a', '--area', default=None, help="defined detection area")
         parser.add_argument('--min_length', type=int, default=30,
                             help="minLineLength of HoghLinesP")
 
@@ -406,14 +390,64 @@ if __name__ == '__main__':
         if "youtube" in a.path:
             a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
 
-        detector = MeteorDetect(a.path, a.output_dir,
-                                a.to, a.mask, a.min_length)
+        detector = MeteorDetect(a.path, a.output_dir, a.to, a.min_length)
         try:
             if detector.connect():
+                # 接続先のフレームサイズをもとにマスクを生成
+                detector.mask = make_mask(a.mask, a.area, detector.size())
                 detector.start(a.exposure, a.no_window)
         except KeyboardInterrupt:
             detector.stop()
 
+
+    # マスク領域と検出領域を合成
+    def make_mask(mask, area, size):
+        mask = detection_mask(mask, size)
+        area = detection_area(area, size)
+        if mask is None:
+            return area
+        if area is None:
+            return mask
+        return lighten_composite([mask, area])
+
+    # マスク領域を指定
+    def detection_mask(a, size):
+        import re
+
+        if a == None:
+            return None
+        t = re.split('[,-]', a)
+        if len(t) == 4:
+            (w, h) = size
+            zero = np.zeros((h, w, 3), np.uint8)
+            bp = (int(t[0]), int(t[1]))
+            ep = (int(t[2]), int(t[3]))
+            return cv2.rectangle(zero, bp, ep, (255, 255, 255), -1)
+
+        if a == 'atomcam': # ATOM Cam timestamp
+            return detection_mask("1390,1014-1868,1056", size)
+        if a == 'subaru':  # Subaru/Mauna-Kea timestamp
+            return detection_mask("1660,980-1920,1080" , size)
+        mask = cv2.imread(a) # 画像ファイル指定
+        if mask is None:
+            sys.exit(1)
+        return mask
+
+    # 検出領域を指定 (ex. --area="12,12-1884,1010")
+    def detection_area(a, size):
+        import re
+
+        if a is None:
+            return None
+        if a == "atomcam":
+            return detection_area("12,12-1908,1068", size)
+        (w, h) = size
+        zero = np.zeros((h, w, 3), np.uint8)
+        mask = cv2.rectangle(zero, (0, 0), size, (255, 255, 255), -1)
+        t = re.split('[,-]', a)
+        bp = (int(t[0]), int(t[1]))
+        ep = (int(t[2]), int(t[3]))
+        return cv2.rectangle(mask, bp, ep, (0, 0, 0), -1)
 
     # YouTubeのビデオストリームURLの取得
     def get_youtube_stream(u, property):
