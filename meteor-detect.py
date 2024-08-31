@@ -205,8 +205,7 @@ class MeteorDetect:
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
             # 始点、終点のどちらかがマスクされていなければ有効とする
-            if self.valid_pos(mask, xb, yb) or \
-               self.valid_pos(mask, xe, ye):
+            if self.valid_pos(mask, xb, yb) or self.valid_pos(mask, xe, ye):
                 r.append(line)
         if len(r) == 0:
             return None
@@ -490,7 +489,7 @@ if __name__ == '__main__':
             return mask
         return lighten_composite([mask, area])
 
-    # マスク領域を指定
+    # マスク指定を画像に変換
     def detection_mask(a, size):
         import re
 
@@ -513,12 +512,14 @@ if __name__ == '__main__':
             sys.exit(1)
         return mask
 
-    # 検出領域を指定 (ex. --area="12,12-1884,1010")
+    # 検出領域指定を画像に変換
     def detection_area(a, size):
         import re
 
         if a is None:
             return None
+        # ATOM Cam 2は周辺10ピクセルにノイズが発生することが
+        # しばしばあるため、4辺の12ピクセルを除外する。
         if a == "atomcam":
             return detection_area("12,12-1908,1068", size)
         (w, h) = size
