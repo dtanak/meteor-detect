@@ -37,104 +37,7 @@ YouTube = {
     "any_youtube": "YouTube"
 }
 
-def composite(list_images):
-    """画像リストの合成(単純スタッキング)
-
-    Args:
-      list_images: 画像データのリスト
-
-    Returns:
-      合成された画像
-    """
-    equal_fraction = 1.0 / (len(list_images))
-
-    output = np.zeros_like(list_images[0])
-
-    for img in list_images:
-        output = output + img * equal_fraction
-
-    output = output.astype(np.uint8)
-
-    return output
-
-
-def median(list_images, opencl=False):
-    img_list = []
-    if opencl:
-        for img in list_images:
-            img_list.append(cv2.UMat.get(img))
-    else:
-        for img in list_images:
-            img_list.append(img)
-
-    return np.median(img_list, axis=0).astype(np.uint8)
-
-
-def average(list_images, opencl=False):
-    img_list = []
-    if opencl:
-        for img in list_images:
-            img_list.append(cv2.UMat.get(img))
-    else:
-        for img in list_images:
-            img_list.append(img)
-
-    return np.average(img_list, axis=0).astype(np.uint8)
-
-
-def brightest(img_list):
-    """比較明合成処理
-    Args:
-      img_list: 画像データのリスト
-
-    Returns:
-      比較明合成された画像
-    """
-    output = img_list[0]
-
-    for img in img_list[1:]:
-        output = cv2.max(img, output)
-
-    return output
-
-def diff(img_list, mask):
-    """画像リストから差分画像のリストを作成する。
-
-    Args:
-      img_list: 画像データのリスト
-      mask: マスク画像(2値画像)
-
-    Returns:
-      差分画像のリスト
-    """
-    diff_list = []
-    for img1, img2 in zip(img_list[:-2], img_list[1:]):
-        if mask is not None:
-            img1 = cv2.bitwise_or(img1, mask)
-            img2 = cv2.bitwise_or(img2, mask)
-        diff_list.append(cv2.subtract(img1, img2))
-
-    return diff_list
-
-
-def detect(img, min_length):
-    """画像上の線状のパターンを流星として検出する。
-    Args:
-      img: 検出対象となる画像
-      min_length: HoughLinesPで検出する最短長(ピクセル)
-    Returns:
-      検出結果
-    """
-    blur_size = (5, 5)
-    blur = cv2.GaussianBlur(img, blur_size, 0)
-    canny = cv2.Canny(blur, 100, 200, 3)
-
-    # The Hough-transform algo:
-    return cv2.HoughLinesP(
-        canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
-
-
-class AtomCam:
+class MeteorDetect:
     def __init__(self, video_url=ATOM_CAM_RTSP, output=None, end_time="0600",
                  clock=False, mask=None, minLineLength=30, opencl=False):
         self._running = False
@@ -296,7 +199,7 @@ class AtomCam:
                 break
 
             if len(img_list) > 2:
-                self.composite_img = brightest(img_list)
+                self.composite_img = lighten_composite(img_list)
                 if not no_window:
                     cv2.imshow('{}'.format(self.source), self.composite_img)
                 self.detect_meteor(img_list)
@@ -318,7 +221,7 @@ class AtomCam:
         if len(img_list) > 2:
             # 差分間で比較明合成を取るために最低3フレームが必要。
             # 画像のコンポジット(単純スタック)
-            diff_img = brightest(diff(img_list, self.mask))
+            diff_img = lighten_composite(diff_images(img_list, self.mask))
             try:
                 # if True:
                 if now.hour != self.now.hour:
@@ -331,7 +234,7 @@ class AtomCam:
                     cv2.imwrite(path_name, mean_img)
                     self.now = now
 
-                detected = detect(diff_img, self.min_length)
+                detected = detect_meteor_lines(diff_img, self.min_length)
                 if detected is not None:
                     '''
                     for meteor_candidate in detected:
@@ -385,7 +288,7 @@ def streaming_thread(args):
             url = f"rtsp://6199:4003@{ATOM_CAM_IP}/live"
 
     # print(url)
-    atom = AtomCam(url, args.output, args.to, args.clock,
+    atom = MeteorDetect(url, args.output, args.to, args.clock,
                    args.mask, args.min_length)
     if not atom.capture.isOpened():
         return
@@ -408,6 +311,102 @@ def streaming_thread(args):
 
     t_in.join()
     return
+
+def composite(list_images):
+    """画像リストの合成(単純スタッキング)
+
+    Args:
+      list_images: 画像データのリスト
+
+    Returns:
+      合成された画像
+    """
+    equal_fraction = 1.0 / (len(list_images))
+
+    output = np.zeros_like(list_images[0])
+
+    for img in list_images:
+        output = output + img * equal_fraction
+
+    output = output.astype(np.uint8)
+
+    return output
+
+
+def median(list_images, opencl=False):
+    img_list = []
+    if opencl:
+        for img in list_images:
+            img_list.append(cv2.UMat.get(img))
+    else:
+        for img in list_images:
+            img_list.append(img)
+
+    return np.median(img_list, axis=0).astype(np.uint8)
+
+
+def average(list_images, opencl=False):
+    img_list = []
+    if opencl:
+        for img in list_images:
+            img_list.append(cv2.UMat.get(img))
+    else:
+        for img in list_images:
+            img_list.append(img)
+
+    return np.average(img_list, axis=0).astype(np.uint8)
+
+
+def lighten_composite(img_list):
+    """比較明合成処理
+    Args:
+      img_list: 画像データのリスト
+
+    Returns:
+      比較明合成された画像
+    """
+    output = img_list[0]
+
+    for img in img_list[1:]:
+        output = cv2.max(img, output)
+
+    return output
+
+def diff_images(img_list, mask):
+    """画像リストから差分画像のリストを作成する。
+
+    Args:
+      img_list: 画像データのリスト
+      mask: マスク画像(2値画像)
+
+    Returns:
+      差分画像のリスト
+    """
+    diff_list = []
+    for img1, img2 in zip(img_list[:-2], img_list[1:]):
+        if mask is not None:
+            img1 = cv2.bitwise_or(img1, mask)
+            img2 = cv2.bitwise_or(img2, mask)
+        diff_list.append(cv2.subtract(img1, img2))
+
+    return diff_list
+
+def detect_meteor_lines(img, min_length):
+    """画像上の線状のパターンを流星として検出する。
+    Args:
+      img: 検出対象となる画像
+      min_length: HoughLinesPで検出する最短長(ピクセル)
+    Returns:
+      検出結果
+    """
+    blur_size = (5, 5)
+    blur = cv2.GaussianBlur(img, blur_size, 0)
+    canny = cv2.Canny(blur, 100, 200, 3)
+
+    # The Hough-transform algo:
+    return cv2.HoughLinesP(
+        canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
+
 
 
 if __name__ == '__main__':
