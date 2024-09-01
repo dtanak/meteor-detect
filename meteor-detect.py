@@ -30,6 +30,7 @@ class MeteorDetect:
             self.capture.release()
         cv2.destroyAllWindows()
 
+    # ストリームへの接続またはファイルオープン
     def connect(self):
         if self.capture:
             self.capture.release()
@@ -38,14 +39,14 @@ class MeteorDetect:
         if not self.capture.isOpened():
             return False
 
+        self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+
         self.FPS = min(self.capture.get(cv2.CAP_PROP_FPS), 60)
         # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
 
-        self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         print(f"# {self.path}: ", end="")
         print(f"{self.WIDTH}x{self.HEIGHT}, {self.FPS:.3f} fps", end="")
-
         if self.isfile:
             total_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
             total_time = total_frames / self.FPS
@@ -54,24 +55,29 @@ class MeteorDetect:
             print("")
         return True
 
+    # 検出開始
     def start(self, exposure, min_length, sigma):
         self.output_dir.mkdir(exist_ok=True)
 
+        # サブスレッドでフレームをキューに流し込む
         self.image_queue = queue.Queue(maxsize=200)
         th = threading.Thread(target=self.queue_frames)
         th.start()
 
+        # キューからフレームを読み出し、流星を検出
         self.detect_meteors(exposure, min_length, sigma)
         self.stop()
 
         th.join()
 
+    # 検出終了
     def stop(self):
         if self.image_queue:
             while not self.image_queue.empty():
                 self.image_queue.get()
         self._running = False
 
+    # フレームサイズ
     def size(self):
         return (self.WIDTH, self.HEIGHT)
 
@@ -81,7 +87,7 @@ class MeteorDetect:
         tz = self.local_timezone()
 
         if self.isfile:
-            t = self.file_date = find_file_date(self.path).astimezone(tz)
+            t = self.file_date = self.find_file_date(self.path).astimezone(tz)
         else:
             t = datetime.now(tz)
         print("# {} start".format(self.datetime_str(t)))
@@ -90,24 +96,23 @@ class MeteorDetect:
             r, frame = self.capture.read()
             if not r: # EOF or lost connection
                 break
-            if not self.isfile and self.time_to is not None:
-                if self.time_to < t:
-                    break
             if self.isfile:
-                cp = self.capture.get(cv2.CAP_PROP_POS_FRAMES)
-                t = self.file_date + self.elapsed_time(cp)
+                t = self.file_date + self.elapsed_time()
             else:
                 t = datetime.now(tz)
+                if self.time_to is not None and self.time_to < t:
+                    break
             self.image_queue.put((t, frame))
         self.image_queue.put(None)
         print("# {} stop".format(self.datetime_str(t)))
 
     # ファイル先頭からの経過時間
-    def elapsed_time(self, current_pos):
+    def elapsed_time(self):
+        current_pos = self.capture.get(cv2.CAP_PROP_POS_FRAMES)
         current_sec = current_pos / self.FPS
         sec = int(current_sec)
-        micro_sec = int((current_sec - sec) * 1000000)
-        return timedelta(seconds=sec, microseconds=micro_sec)
+        microsec = int((current_sec - sec) * 1000000)
+        return timedelta(seconds=sec, microseconds=microsec)
 
     def detect_meteors(self, exposure, min_length, sigma):
         accmframes = [] # 流星出現直前からの累積フレーム
@@ -172,19 +177,11 @@ class MeteorDetect:
             frames.append(frame)
         return (t, frames)
 
-    # 毎正時のスカイモニター
-    def monitor_sky(self, t, frames):
-        if not 'prev_monitor_time' in vars(self):
-            self.prev_monitor_time = t
-        if self.prev_monitor_time.hour == t.hour:
-            return
-        self.prev_monitor_time = t
-        basename = t.strftime(self.basename)
-        path = str(pathlib.Path(self.output_dir, basename + ".jpg"))
-        try:
-            cv2.imwrite(path, average(frames, self.opencl))
-        except Exception as e:
-            print(traceback.format_exc())
+    # フレームのうち後半のfraction(0 〜 1.0)
+    def last_frames(self, frames, fraction):
+        n = len(frames)
+        k = int(n * (1 - fraction))
+        return frames[k:]
 
     # 線分(移動天体)を検出
     def detect_meteor_lines(self, frames, min_length, sigma):
@@ -192,9 +189,10 @@ class MeteorDetect:
             return None
         # (1) フレーム間の差をとり、結果を比較明合成
         diff_img = lighten_composite(diff_images(frames, None))
-        # ※ オリジナル版は diff_images の第二引数に mask を与えて、
-        # 画像の一部をマスクしていたが、矩形マスクの縁を直線として
-        # 検出してしまうことがあるため、ロジックを変更した。
+        # ※ オリジナル版は diff_images の第二引数に mask を与えて画像の
+        # 一部をマスクしていたが、矩形マスクの縁を直線として検出してしま
+        # うことがあるため、線分の始点・終点がマスク領域にあるかで判定す
+        # るように変更。
 
         # (2) Hough-transform で画像から線分を検出
         return detect_line_patterns(diff_img, min_length, sigma)
@@ -210,8 +208,6 @@ class MeteorDetect:
         if len(r) == 0:
             return None
         return r
-
-    # 点x,yがマスクされていないか?
     def valid_pos(self, mask, x, y):
         if mask is None:
             return True
@@ -219,15 +215,6 @@ class MeteorDetect:
         # print(f"{x} {y} {pv}")
         b, g, r = pv.squeeze()
         return b == 0 and g == 0 and r == 0
-
-    # 検出結果のダンプ。デバッグ用
-    def dump_detected_lines(self, t, frames, lines):
-        print("D {} {} lines:".format(self.datetime_str(t), len(lines)))
-        for meteor_candidate in lines:
-            print('D  {}'.format(meteor_candidate))
-        basename = t.strftime(self.basename)
-        path_diffs = str(Path(self.output_dir, basename + "_d.jpg"))
-        self.save_diffs(frames, path_diffs, lines)
 
     # 画像・動画の保存
     def save_frames(self, t, frames):
@@ -239,10 +226,8 @@ class MeteorDetect:
             self.save_movie(frames, path_movie)
         except Exception as e:
             print(traceback.format_exc())
-    # 画像リストを画像ファイルとして保存
     def save_image(self, frames, path):
         cv2.imwrite(path, lighten_composite(frames))
-    # 画像リストを動画ファイルとして保存
     def save_movie(self, img_list, pathname):
         """
         画像リストから動画を作成する。
@@ -255,7 +240,15 @@ class MeteorDetect:
         for img in img_list:
             video.write(img)
         video.release()
-    # 検出結果を画像として保存
+
+    # 検出結果のダンプ。デバッグ用
+    def dump_detected_lines(self, t, frames, lines):
+        print("D {} {} lines:".format(self.datetime_str(t), len(lines)))
+        for meteor_candidate in lines:
+            print('D  {}'.format(meteor_candidate))
+        basename = t.strftime(self.basename)
+        path = str(Path(self.output_dir, basename + "_d.jpg"))
+        self.save_diffs(frames, path, lines)
     def save_diffs(self, frames, path, lines):
         diff = lighten_composite(diff_images(frames, None))
         for line in lines:
@@ -263,51 +256,63 @@ class MeteorDetect:
             diff = cv2.line(diff, (xb, yb), (xe, ye), (0, 255, 255))
         cv2.imwrite(path, diff)
 
-    # フレームのうち後半のfraction(0 〜 1.0)をとりだす
-    def last_frames(self, frames, fraction):
-        n = len(frames)
-        k = int(n * (1 - fraction))
-        return frames[k:]
-
     # 検出ログ
     def detection_log(self, t):
         ds = self.datetime_str(t)
         if self.isfile:
+            # ファイル先頭からの経過時間を付与
             et = (t - self.file_date).total_seconds()
             print('M {} {:8.3f}'.format(ds, et))
         else:
+            # 接続先のURLを付与
             print('M {} {}'.format(ds, self.path))
+
+    # 毎正時のスカイモニター
+    def monitor_sky(self, t, frames):
+        if not 'prev_monitored_time' in vars(self):
+            self.prev_monitored_time = t
+        if self.prev_monitored_time.hour == t.hour:
+            return
+        self.prev_monitored_time = t
+        basename = t.strftime(self.basename)
+        path = str(Path(self.output_dir, basename + "_s.jpg"))
+        try:
+            cv2.imwrite(path, average(frames, self.opencl))
+        except Exception as e:
+            print(traceback.format_exc())
 
     def datetime_str(self, t):
         # ミリセカンドまで表示
         return t.strftime("%Y-%m-%d %H:%M:%S.") + t.strftime("%f")[0:3]
 
-    def local_timezone(self):
+    @classmethod
+    def local_timezone(cls):
         # ローカルのタイムゾーン: ビルトインな関数がありそうな気がする。
         time.tzset()
         tv = int(time.time())
         zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
         return timezone(timedelta(seconds=zs))
 
-def find_file_date(u):
-    try:
-        date = mpeg_date(u)
-        # Python 3.9の fromisoformat は"Z" timezoneで例外を起こす。
-        date = date.replace('Z', '+00:00')
-        return datetime.fromisoformat(date)
-    except Exception as e:
-        return datetime.fromisoformat("2001-01-01T00:00:00+00:00")
+    # ファイル日時のメタデータ
+    def find_file_date(self, u):
+        try:
+            date = self.mpeg_date(u)
+            # Python 3.9の fromisoformat は"Z" timezoneで例外を起こす。
+            date = date.replace('Z', '+00:00')
+            return datetime.fromisoformat(date)
+        except Exception as e:
+            return datetime.fromisoformat("2001-01-01T00:00:00+00:00")
+    def mpeg_date(self, path):
+        import subprocess
+        import re
 
-def mpeg_date(path):
-    import subprocess
-    import re
-
-    # ffmpegコマンドを使い動画ファイルの creation_time を取得
-    p = subprocess.run(["ffmpeg", "-i", path], capture_output=True, text=True)
-    for t in p.stderr.split("\n"):
-        if "creation_time" in t:
-            return re.sub('.*creation_time *: *', '', t)
-    return None
+        # ffmpegコマンドを使い動画ファイルの creation_time を取得
+        command = ["ffmpeg", "-i", path]
+        p = subprocess.run(command, capture_output=True, text=True)
+        for t in p.stderr.split("\n"):
+            if "creation_time" in t:
+                return re.sub('.*creation_time *: *', '', t)
+        return None
 
 def composite(list_images):
     """画像リストの合成(単純スタッキング)
@@ -463,7 +468,6 @@ if __name__ == '__main__':
         def signal_receptor(signum, frame):
             a.re_connect = False
             detector.stop()
-
         signal.signal(signal.SIGHUP, signal_receptor)
 
         # 行毎に標準出力のバッファをflushする。
@@ -483,8 +487,36 @@ if __name__ == '__main__':
                 if not a.re_connect or detector.isfile:
                     break
                 time.sleep(5)
+                # re_connect オプション指定時は5秒スリープ後に再接続
         except KeyboardInterrupt:
             detector.stop()
+
+    # YouTubeのビデオストリームURLの取得
+    def get_youtube_stream(u, property):
+        try:
+            import apafy as pafy
+        except Exception:
+            # pafyを使う場合はpacheが必要。
+            import pafy
+
+        print(f"# connecting to YouTube: {u}")
+
+        for retry in range(10):
+            try:
+                video = pafy.new(u, ydl_opts={'nocheckcertificate': True})
+            except Exception as e:
+                print(str(e))
+                traceback.print_exc(file=sys.stdout)
+                sys.exit(1)
+            # video = pafy.new(u)
+            # best = video.getbest(preftype="mp4")
+            for v in video.videostreams:
+                if str(v) == property:
+                    return v.url
+            print(f"# retrying to connect to YouTube: {retry}")
+            time.sleep(2)
+        print(f"# {u}: retry count exceeded, exit.")
+        sys.exit(1)
 
     # マスク領域と検出領域を合成
     def make_mask(mask, area, size):
@@ -525,8 +557,8 @@ if __name__ == '__main__':
 
         if a is None:
             return None
-        # ATOM Cam 2は周辺10ピクセルにノイズが発生することが
-        # しばしばあるため、4辺の12ピクセルを除外する。
+        # ATOM Cam 2は周辺10ピクセル付近にノイズが発生することがあるため、
+        # 4辺の12ピクセル近傍を除外する。
         if a == "atomcam":
             return detection_area("12,12-1908,1068", size)
         (w, h) = size
@@ -536,32 +568,5 @@ if __name__ == '__main__':
         bp = (int(t[0]), int(t[1]))
         ep = (int(t[2]), int(t[3]))
         return cv2.rectangle(mask, bp, ep, (0, 0, 0), -1)
-
-    # YouTubeのビデオストリームURLの取得
-    def get_youtube_stream(u, property):
-        try:
-            import apafy as pafy
-        except Exception:
-            # pafyを使う場合はpacheが必要。
-            import pafy
-
-        print(f"# connecting to YouTube: {u}")
-
-        for retry in range(10):
-            try:
-                video = pafy.new(u, ydl_opts={'nocheckcertificate': True})
-            except Exception as e:
-                print(str(e))
-                traceback.print_exc(file=sys.stdout)
-                sys.exit(1)
-            # video = pafy.new(u)
-            # best = video.getbest(preftype="mp4")
-            for v in video.videostreams:
-                if str(v) == property:
-                    return v.url
-            print(f"# retrying to connect to YouTube: {retry}")
-            time.sleep(2)
-        print(f"# {u}: retry count exceeded, exit.")
-        sys.exit(1)
 
     main()
