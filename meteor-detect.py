@@ -579,7 +579,6 @@ if __name__ == '__main__':
         t = datetime(n.year, n.month, n.day, t.hour, t.minute)
         if t < n:
             t = t + timedelta(hours=24)
-        print(type(t.replace(tzinfo=MeteorDetect.local_timezone())))
         return t.replace(tzinfo=MeteorDetect.local_timezone())
 
     main()
