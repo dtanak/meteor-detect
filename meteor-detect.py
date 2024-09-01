@@ -100,9 +100,10 @@ class MeteorDetect:
                 t = self.file_date + self.elapsed_time()
             else:
                 t = datetime.now(tz)
-                if self.time_to is not None and self.time_to < t:
+                if self.time_to and self.time_to < t:
                     break
             self.image_queue.put((t, frame))
+
         self.image_queue.put(None)
         print("# {} stop".format(self.datetime_str(t)))
 
@@ -426,6 +427,8 @@ if __name__ == '__main__':
                             help='画面表示')
         parser.add_argument('-r', '--re_connect', action='store_true',
                             help='try to re-connect when lost connection')
+        parser.add_argument('-t', '--time_to', default=None,
+                            help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
         parser.add_argument('-e', '--exposure', type=int,
                             default=1, help='露出時間(second)')
         parser.add_argument('-o', '--output_dir', default=".",
@@ -464,11 +467,12 @@ if __name__ == '__main__':
         if "youtube" in a.path:
             a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
 
-        # HUP シグナルを受信したら終了
+        # シグナルを受信したら終了
         def signal_receptor(signum, frame):
             a.re_connect = False
             detector.stop()
         signal.signal(signal.SIGHUP, signal_receptor)
+        signal.signal(signal.SIGINT, signal_receptor)
 
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
@@ -478,18 +482,16 @@ if __name__ == '__main__':
         detector.show_window = a.show_window
         detector.basename = a.basename
         detector.output_dir = Path(a.output_dir)
-        try:
-            while True:
-                if detector.connect():
-                    # 接続先のフレームサイズをもとにマスクを生成
-                    detector.mask = make_mask(a.mask, a.area, detector.size())
-                    detector.start(a.exposure, a.min_length, a.sigma)
-                if not a.re_connect or detector.isfile:
-                    break
-                time.sleep(5)
-                # re_connect オプション指定時は5秒スリープ後に再接続
-        except KeyboardInterrupt:
-            detector.stop()
+        detector.time_to = next_hhmm(a.time_to)
+        while True:
+            if detector.connect():
+                # 接続先のフレームサイズをもとにマスクを生成
+                detector.mask = make_mask(a.mask, a.area, detector.size())
+                detector.start(a.exposure, a.min_length, a.sigma)
+            if not a.re_connect or detector.isfile:
+                break
+            time.sleep(5)
+            # re_connect オプション指定時は5秒スリープ後に再接続
 
     # YouTubeのビデオストリームURLの取得
     def get_youtube_stream(u, property):
@@ -568,5 +570,16 @@ if __name__ == '__main__':
         bp = (int(t[0]), int(t[1]))
         ep = (int(t[2]), int(t[3]))
         return cv2.rectangle(mask, bp, ep, (0, 0, 0), -1)
+
+    def next_hhmm(hhmm):
+        if hhmm is None:
+            return None
+        n = datetime.now()
+        t = datetime.strptime(hhmm, "%H%M")
+        t = datetime(n.year, n.month, n.day, t.hour, t.minute)
+        if t < n:
+            t = t + timedelta(hours=24)
+        print(type(t.replace(tzinfo=MeteorDetect.local_timezone())))
+        return t.replace(tzinfo=MeteorDetect.local_timezone())
 
     main()
