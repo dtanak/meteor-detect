@@ -18,12 +18,13 @@ class MeteorDetect:
         self.path = path
         self.isfile = os.path.isfile(path)
         self.opencl = False
-        self.capture = None
         self.output_dir = Path(".")
         self.basename = "%Y%m%d%H%M%S"
         self.debug = False
         self.show_window = False
         self.time_to = None
+        self.mask = None
+        self.capture = None
 
     def __del__(self):
         if self.capture:
@@ -87,22 +88,25 @@ class MeteorDetect:
         tz = self.local_timezone()
 
         if self.isfile:
-            t = self.file_date = self.find_file_date(self.path).astimezone(tz)
+            t = self.find_file_date(self.path).astimezone(tz)
         else:
             t = datetime.now(tz)
+        self.base_date = t
+
         print("# {} start".format(self.datetime_str(t)))
         self._running = True
         while self._running:
             r, frame = self.capture.read()
             if not r: # EOF or lost connection
                 break
+            self.image_queue.put((t, frame))
+
             if self.isfile:
-                t = self.file_date + self.elapsed_time()
+                t = self.base_date + self.elapsed_time()
             else:
                 t = datetime.now(tz)
                 if self.time_to and self.time_to < t:
                     break
-            self.image_queue.put((t, frame))
 
         self.image_queue.put(None)
         print("# {} stop".format(self.datetime_str(t)))
@@ -126,6 +130,10 @@ class MeteorDetect:
                 break
             (t, frames) = tf
 
+            if self.debug:
+                if t == self.base_date and self.mask is not None:
+                    self.dump_mask_frame(t, self.mask)
+
             if self.show_window:
                 composite_img = lighten_composite(frames)
                 cv2.imshow('{}'.format(self.path), composite_img)
@@ -135,7 +143,7 @@ class MeteorDetect:
 
             lines = self.detect_meteor_lines(frames, min_length, sigma)
             if lines is not None:
-                lines = self.mask_lines(self.mask, lines)
+                lines = self.exclude_masked_lines(self.mask, lines)
 
             accmframes += frames
             if lines is not None:
@@ -199,7 +207,7 @@ class MeteorDetect:
         return detect_line_patterns(diff_img, min_length, sigma)
 
     # マスクされた線分を除外
-    def mask_lines(self, mask, lines):
+    def exclude_masked_lines(self, mask, lines):
         r = []
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
@@ -257,12 +265,17 @@ class MeteorDetect:
             diff = cv2.line(diff, (xb, yb), (xe, ye), (0, 255, 255))
         cv2.imwrite(path, diff)
 
+    def dump_mask_frame(self, t, mask):
+        basename = t.strftime(self.basename)
+        path = str(Path(self.output_dir, basename + "_m.png"))
+        cv2.imwrite(path, mask)
+
     # 検出ログ
     def detection_log(self, t):
         ds = self.datetime_str(t)
         if self.isfile:
             # ファイル先頭からの経過時間を付与
-            et = (t - self.file_date).total_seconds()
+            et = (t - self.base_date).total_seconds()
             print('M {} {:8.3f}'.format(ds, et))
         else:
             # 接続先のURLを付与
@@ -315,6 +328,7 @@ class MeteorDetect:
                 return re.sub('.*creation_time *: *', '', t)
         return None
 
+'''
 def composite(list_images):
     """画像リストの合成(単純スタッキング)
 
@@ -346,7 +360,7 @@ def median(list_images, opencl=False):
             img_list.append(img)
 
     return np.median(img_list, axis=0).astype(np.uint8)
-
+'''
 
 def average(list_images, opencl=False):
     img_list = []
@@ -436,9 +450,7 @@ if __name__ == '__main__':
         parser.add_argument('-b', '--basename', default="%Y%m%d%H%M%S",
                             help="basename of output in strftime format")
         parser.add_argument(
-            '-m', '--mask', default=None, help="mask image")
-        parser.add_argument(
-            '-a', '--area', default=None, help="defined detection area")
+            '-m', '--mask', default=None, help="exclusion mask")
         parser.add_argument('--min_length', type=int, default=30,
                             help="minLineLength of HoghLinesP")
         parser.add_argument('--sigma', type=float, default=0.0,
@@ -485,8 +497,8 @@ if __name__ == '__main__':
         detector.time_to = next_hhmm(a.time_to)
         while True:
             if detector.connect():
-                # 接続先のフレームサイズをもとにマスクを生成
-                detector.mask = make_mask(a.mask, a.area, detector.size())
+                # 接続先のフレームサイズをもとにマスク画像を生成
+                detector.mask = exclusion_mask(a.mask, detector.size())
                 detector.start(a.exposure, a.min_length, a.sigma)
             if not a.re_connect or detector.isfile:
                 break
@@ -520,57 +532,54 @@ if __name__ == '__main__':
         print(f"# {u}: retry count exceeded, exit.")
         sys.exit(1)
 
-    # マスク領域と検出領域を合成
-    def make_mask(mask, area, size):
-        mask = detection_mask(mask, size)
-        area = detection_area(area, size)
-        if mask is None:
-            return area
-        if area is None:
-            return mask
-        return lighten_composite([mask, area])
-
-    # マスク指定を画像に変換
-    def detection_mask(a, size):
-        import re
-
-        if a == None:
-            return None
-        t = re.split('[,-]', a)
-        if len(t) == 4:
-            (w, h) = size
-            zero = np.zeros((h, w, 3), np.uint8)
-            bp = (int(t[0]), int(t[1]))
-            ep = (int(t[2]), int(t[3]))
-            return cv2.rectangle(zero, bp, ep, (255, 255, 255), -1)
-
-        if a == 'atomcam': # ATOM Cam timestamp
-            return detection_mask("1390,1014-1868,1056", size)
-        if a == 'subaru':  # Subaru/Mauna-Kea timestamp
-            return detection_mask("1660,980-1920,1080" , size)
-        mask = cv2.imread(a) # 画像ファイル指定
-        if mask is None:
-            sys.exit(1)
-        return mask
-
-    # 検出領域指定を画像に変換
-    def detection_area(a, size):
-        import re
-
+    # マスクフレームを生成
+    def exclusion_mask(a, size):
         if a is None:
             return None
-        # ATOM Cam 2は周辺10ピクセル付近にノイズが発生することがあるため、
-        # 4辺の12ピクセル近傍を除外する。
-        if a == "atomcam":
-            return detection_area("12,12-1908,1068", size)
-        (w, h) = size
-        zero = np.zeros((h, w, 3), np.uint8)
-        mask = cv2.rectangle(zero, (0, 0), size, (255, 255, 255), -1)
-        t = re.split('[,-]', a)
-        bp = (int(t[0]), int(t[1]))
-        ep = (int(t[2]), int(t[3]))
-        return cv2.rectangle(mask, bp, ep, (0, 0, 0), -1)
 
+        (w, h) = size
+        mask = np.zeros((h, w, 3), np.uint8)
+        for t in parse_mask_text(a):
+            p, bp, ep = t
+            rect = np.zeros((h, w, 3), np.uint8)
+            if p == '+':
+                rect = cv2.rectangle(rect, (0, 0), size, (255, 255, 255), -1)
+                rect = cv2.rectangle(rect, bp, ep, (0, 0, 0), -1)
+            if p == '-':
+                rect = cv2.rectangle(rect, bp, ep, (255, 255, 255), -1)
+            if p == '@':
+                rect = cv2.imread(bp)
+            mask = lighten_composite([mask, rect])
+        return mask
+    # マスク指定文字列をパース
+    def parse_mask_text(a):
+        import re
+
+        r = []
+        for u in re.split('[ :]', a):
+            if u == 'atomcam': # ATOM Cam 2/Swing
+                r.append(('+', (  12,   12), (1908, 1068)))
+                # 周辺10ピクセル付近にノイズが発生することがあるため、
+                # 4辺の12ピクセル近傍を除外する。
+                r.append(('-', (1390, 1014), (1868, 1056)))
+                # 日時表示領域を除外
+                continue
+            if u == 'subaru': # 朝日新聞社マウナケア天文台設置カメラ
+                r.append(('-', (1660,  980), (1920, 1080)))
+                # 日時表示領域を除外
+                continue
+            if u[0] != '+' and u[0] != '-':
+                r.append(('@', u, None)) # ファイル名として追加
+                continue
+            t = re.split(',', u[1:])
+            if len(t) != 4:
+                return None
+            bp = (int(t[0]), int(t[1]))
+            ep = (int(t[2]), int(t[3]))
+            r.append((u[0], bp, ep))
+        return r
+
+    # "HHMM" 形式を現在時刻以降の最初の aware な datetimeに変換
     def next_hhmm(hhmm):
         if hhmm is None:
             return None
