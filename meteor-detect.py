@@ -19,7 +19,7 @@ class MeteorDetect:
         self.isfile = os.path.isfile(path)
         self.opencl = False
         self.output_dir = Path(".")
-        self.basename = "%Y%m%d%H%M%S"
+        self.nameformat = "%Y%m%d%H%M%S"
         self.debug = False
         self.show_window = False
         self.time_to = None
@@ -91,7 +91,7 @@ class MeteorDetect:
             t = self.find_file_date(self.path).astimezone(tz)
         else:
             t = datetime.now(tz)
-        self.base_date = t
+        self.base_time = t
 
         print("# {} start".format(self.datetime_str(t)))
         self._running = True
@@ -102,7 +102,7 @@ class MeteorDetect:
             self.image_queue.put((t, frame))
 
             if self.isfile:
-                t = self.base_date + self.elapsed_time()
+                t = self.base_time + self.elapsed_time()
             else:
                 t = datetime.now(tz)
                 if self.time_to and self.time_to < t:
@@ -131,15 +131,13 @@ class MeteorDetect:
             (t, frames) = tf
 
             if self.debug:
-                if t == self.base_date and self.mask is not None:
-                    self.dump_mask_frame(t, self.mask)
+                if t == self.base_time and self.mask is not None:
+                    self.save_image(self.mask, self.timename(t) + "_m.png")
+                if not self.isfile:
+                    self.monitor_sky(t, frames)
 
             if self.show_window:
-                composite_img = lighten_composite(frames)
-                cv2.imshow('{}'.format(self.path), composite_img)
-
-            if not self.isfile and self.debug:
-                self.monitor_sky(t, frames)
+                self.show_image(frames)
 
             lines = self.detect_meteor_lines(frames, min_length, sigma)
             if lines is not None:
@@ -152,9 +150,9 @@ class MeteorDetect:
                     self.dump_detected_lines(t, frames, lines)
                 if detected_time is None:
                     detected_time = t
-                    postexposures = 1
+                    postexposures = 2
             elif 0 < postexposures:
-                # post-capture frames      exposure time x 1
+                # post-capture frames      exposure time x 2
                 postexposures -= 1
             else:
                 # post-capture last frames exposure time x 1
@@ -186,6 +184,11 @@ class MeteorDetect:
             frames.append(frame)
         return (t, frames)
 
+    def show_image(self, frames):
+        cimage = lighten_composite(frames)
+        cimage = self.composite_mask_to_view(cimage, self.mask)
+        cv2.imshow('meteor-detect: {}'.format(self.path), cimage)
+
     # フレームのうち後半のfraction(0 〜 1.0)
     def last_frames(self, frames, fraction):
         n = len(frames)
@@ -194,8 +197,6 @@ class MeteorDetect:
 
     # 線分(移動天体)を検出
     def detect_meteor_lines(self, frames, min_length, sigma):
-        if len(frames) <= 2:
-            return None
         # (1) フレーム間の差をとり、結果を比較明合成
         diff_img = lighten_composite(diff_images(frames, None))
         # ※ オリジナル版は diff_images の第二引数に mask を与えて画像の
@@ -227,55 +228,34 @@ class MeteorDetect:
 
     # 画像・動画の保存
     def save_frames(self, t, frames):
-        try:
-            basename = t.strftime(self.basename)
-            path_image = str(Path(self.output_dir, basename + ".jpg"))
-            self.save_image(frames, path_image)
-            path_movie = str(Path(self.output_dir, basename + ".mp4"))
-            self.save_movie(frames, path_movie)
-        except Exception as e:
-            print(traceback.format_exc())
-    def save_image(self, frames, path):
-        cv2.imwrite(path, lighten_composite(frames))
-    def save_movie(self, img_list, pathname):
-        """
-        画像リストから動画を作成する。
-        Args:
-          imt_list: 画像のリスト
-          pathname: 出力ファイル名
-        """
-        fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-        video = cv2.VideoWriter(pathname, fourcc, self.FPS, self.size())
-        for img in img_list:
-            video.write(img)
-        video.release()
+        cimage = lighten_composite(frames)
+        self.save_image(cimage, self.timename(t) + ".jpg")
+        self.save_movie(frames, self.timename(t) + ".mp4")
 
     # 検出結果のダンプ。デバッグ用
     def dump_detected_lines(self, t, frames, lines):
         print("D {} {} lines:".format(self.datetime_str(t), len(lines)))
         for meteor_candidate in lines:
             print('D  {}'.format(meteor_candidate))
-        basename = t.strftime(self.basename)
-        path = str(Path(self.output_dir, basename + "_d.jpg"))
-        self.save_diffs(frames, path, lines)
-    def save_diffs(self, frames, path, lines):
-        diff = lighten_composite(diff_images(frames, None))
+        dimage = lighten_composite(diff_images(frames, None))
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
-            diff = cv2.line(diff, (xb, yb), (xe, ye), (0, 255, 255))
-        cv2.imwrite(path, diff)
+            dimage = cv2.line(dimage, (xb, yb), (xe, ye), (0, 255, 255))
+        dimage = self.composite_mask_to_view(dimage, self.mask)
+        self.save_image(dimage, self.timename(t) + "_d.jpg")
 
-    def dump_mask_frame(self, t, mask):
-        basename = t.strftime(self.basename)
-        path = str(Path(self.output_dir, basename + "_m.png"))
-        cv2.imwrite(path, mask)
+    # マスク領域を可視化
+    def composite_mask_to_view(self, i, mask):
+        if mask is None:
+            return i
+        return cv2.addWeighted(i, 1.0, mask, 0.2, 1.0)
 
     # 検出ログ
     def detection_log(self, t):
         ds = self.datetime_str(t)
         if self.isfile:
             # ファイル先頭からの経過時間を付与
-            et = (t - self.base_date).total_seconds()
+            et = (t - self.base_time).total_seconds()
             print('M {} {:8.3f}'.format(ds, et))
         else:
             # 接続先のURLを付与
@@ -288,12 +268,32 @@ class MeteorDetect:
         if self.prev_monitored_time.hour == t.hour:
             return
         self.prev_monitored_time = t
-        basename = t.strftime(self.basename)
-        path = str(Path(self.output_dir, basename + "_s.jpg"))
+        aimage = average(frames, self.opencl)
+        self.save_image(aimage, self.timename(t) + "_s.jpg")
+
+    def save_image(self, image, path):
         try:
-            cv2.imwrite(path, average(frames, self.opencl))
+            cv2.imwrite(path, image)
         except Exception as e:
             print(traceback.format_exc())
+    def save_movie(self, img_list, pathname):
+        """
+        画像リストから動画を作成する。
+        Args:
+          imt_list: 画像のリスト
+          pathname: 出力ファイル名
+        """
+        try:
+            fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+            video = cv2.VideoWriter(pathname, fourcc, self.FPS, self.size())
+            for img in img_list:
+                video.write(img)
+            video.release()
+        except Exception as e:
+            print(traceback.format_exc())
+
+    def timename(self, t):
+        return str(Path(self.output_dir, t.strftime(self.nameformat)))
 
     def datetime_str(self, t):
         # ミリセカンドまで表示
@@ -443,14 +443,15 @@ if __name__ == '__main__':
                             help='try to re-connect when lost connection')
         parser.add_argument('-t', '--time_to', default=None,
                             help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
-        parser.add_argument('-e', '--exposure', type=int,
-                            default=1, help='露出時間(second)')
         parser.add_argument('-o', '--output_dir', default=".",
                             help='検出画像の出力先ディレクトリ名')
-        parser.add_argument('-b', '--basename', default="%Y%m%d%H%M%S",
-                            help="basename of output in strftime format")
+        parser.add_argument(
+            '-n', '--nameformat', default="%Y%m%d%H%M%S",
+            help="format string for output filenames in strftime format")
         parser.add_argument(
             '-m', '--mask', default=None, help="exclusion mask")
+        parser.add_argument('-e', '--exposure', type=int,
+                            default=1, help='露出時間(second)')
         parser.add_argument('--min_length', type=int, default=30,
                             help="minLineLength of HoghLinesP")
         parser.add_argument('--sigma', type=float, default=0.0,
@@ -492,7 +493,7 @@ if __name__ == '__main__':
         detector = MeteorDetect(a.path)
         detector.debug = a.debug
         detector.show_window = a.show_window
-        detector.basename = a.basename
+        detector.nameformat = a.nameformat
         detector.output_dir = Path(a.output_dir)
         detector.time_to = next_hhmm(a.time_to)
         while True:
@@ -561,7 +562,7 @@ if __name__ == '__main__':
                 r.append(('+', (  12,   12), (1908, 1068)))
                 # 周辺10ピクセル付近にノイズが発生することがあるため、
                 # 4辺の12ピクセル近傍を除外する。
-                r.append(('-', (1390, 1014), (1868, 1056)))
+                r.append(('-', (1384, 1008), (1868, 1060)))
                 # 日時表示領域を除外
                 continue
             if u == 'subaru': # 朝日新聞社マウナケア天文台設置カメラ
