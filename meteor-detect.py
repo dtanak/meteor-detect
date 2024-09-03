@@ -157,11 +157,35 @@ class MeteorDetect:
             else:
                 # post-capture last frames exposure time x 1
                 if detected_time is not None:
-                    self.detection_log(detected_time)
-                    self.save_frames(detected_time, accmframes)
+                    td = detected_time
+                    if not self.possible_lightning(td, accmframes) and \
+                       not self.possible_airplane(td, accmframes):
+                        self.detection_log(td)
+                        self.save_frames(td, accmframes)
                     detected_time = None
                 # pre-capture frames       exposure time x 0.2
                 accmframes = self.last_frames(frames, 0.2)
+
+    # 航空機対策: 10秒以上連続しているのは怪しい。
+    # TODO: より丁寧な判定、 同時に流星も出現していたときに取り逃す。
+    # 連続性の判定を出現位置をもとにしないと、流星雨のときに困る。
+    def possible_airplane(self, t, frames):
+        s = len(frames) / self.FPS
+        if 10.0 <= s:
+            ds = self.datetime_str(t)
+            print('X {} {:4.1f} sec: possible airplane'.format(ds, s))
+            return True
+        return False
+
+    # 稲光対策: 輝度230以上が画面の30パーセント以上あったら稲光とみなす。
+    def possible_lightning(self, t, frames):
+        cimage = lighten_composite(frames)
+        r = brightness_rate(cimage, 230) * 100
+        if 30.0 <= r:
+            ds = self.datetime_str(t)
+            print('X {} {:4.1f} %: possible lightning'.format(ds, r))
+            return True
+        return False
 
     # キューから exposure 秒分のフレームをとりだす
     def dequeue_frames(self, exposure):
@@ -423,6 +447,19 @@ def detect_line_patterns(img, min_length, sigma=0):
     # The Hough-transform algo:
     return cv2.HoughLinesP(
         canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
+
+# 高輝度画素の比率
+def brightness_rate(i, th):
+    hsv = cv2.cvtColor(i, cv2.COLOR_RGB2HSV)
+    h, s, v = cv2.split(hsv)
+    n = 0
+    k = 0
+    for r in v.squeeze():
+        for p in r.squeeze():
+            n += 1
+            if th <= p:
+                k += 1
+    return float(k)/float(n)
 
 if __name__ == '__main__':
     import argparse
