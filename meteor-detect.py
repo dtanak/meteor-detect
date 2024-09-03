@@ -122,7 +122,7 @@ class MeteorDetect:
     def detect_meteors(self, exposure, min_length, sigma):
         accmframes = [] # 流星出現直前からの累積フレーム
         postexposures = 0  # 出現後の予備露出数
-        detected_time = None
+        td = None  # 流星検出時刻。連続検出時は最初の検出時刻を保持。
         while True:
             # キューから exposure 秒分のフレームを取り出す
             tf = self.dequeue_frames(exposure)
@@ -146,23 +146,24 @@ class MeteorDetect:
             accmframes += frames
             if lines is not None:
                 # detected frames          exposure time x 1
+                if td is None:
+                    td = t
+                postexposures = 3        # exposure time x (2 + 1)
+                # 連続検出時も postexposuresをリセット
                 if self.debug:
                     self.dump_detected_lines(t, frames, lines)
-                if detected_time is None:
-                    detected_time = t
-                    postexposures = 2
-            elif 0 < postexposures:
+            elif 1 < postexposures:
                 # post-capture frames      exposure time x 2
                 postexposures -= 1
             else:
                 # post-capture last frames exposure time x 1
-                if detected_time is not None:
-                    td = detected_time
+                if td is not None:
                     if not self.possible_lightning(td, accmframes) and \
                        not self.possible_airplane(td, accmframes):
                         self.detection_log(td)
                         self.save_frames(td, accmframes)
-                    detected_time = None
+                    # 航空機・稲光判定は性質上累積フレームの情報が必要
+                    td = None
                 # pre-capture frames       exposure time x 0.2
                 accmframes = self.last_frames(frames, 0.2)
 
@@ -487,7 +488,7 @@ if __name__ == '__main__':
             help="format string for output filenames in strftime format")
         parser.add_argument(
             '-m', '--mask', default=None, help="exclusion mask")
-        parser.add_argument('-e', '--exposure', type=int,
+        parser.add_argument('-e', '--exposure', type=float,
                             default=1, help='露出時間(second)')
         parser.add_argument('--min_length', type=int, default=30,
                             help="minLineLength of HoghLinesP")
