@@ -169,13 +169,13 @@ class MeteorDetect:
                 accmframes = self.last_frames(frames, 0.2)
 
     # 航空機対策: 10秒以上連続しているものを航空機とみなす
-    # TODO: より丁寧な判定ガ必要。同時に流星も出現していたときに取り逃す。
+    # TODO: より丁寧な判定が必要。同時に流星も出現していたときに取り逃す。
     # 流星雨のときに困る。出現位置をもとに連続性の判定を加えるか。
     def possible_airplane(self, t, frames):
         s = len(frames) / self.FPS
-        if 10.0 <= s:
+        if 7.0 <= s:
             ds = self.datetime_str(t)
-            print('X {} {:4.1f} sec: possible airplane'.format(ds, s))
+            print(f"X {ds} {self.path} {s:4.1f} sec: possible airplane")
             return True
         return False
 
@@ -186,7 +186,7 @@ class MeteorDetect:
         r = brightness_rate(cimage, 230) * 100
         if 30.0 <= r:
             ds = self.datetime_str(t)
-            print('X {} {:4.1f} %: possible lightning'.format(ds, r))
+            print(f"X {ds} {self.path} {r:4.1f} %: possible lightning")
             return True
         return False
 
@@ -261,9 +261,11 @@ class MeteorDetect:
 
     # 検出結果のダンプ。デバッグ用
     def dump_detected_lines(self, t, frames, lines):
-        print("D {} {} lines:".format(self.datetime_str(t), len(lines)))
-        for meteor_candidate in lines:
-            print('D  {}'.format(meteor_candidate))
+        ds = self.datetime_str(t)
+        n = len(lines)
+        print(f"D {ds} {self.path} {n} lines:")
+        for line in lines:
+            print(f"D  {line}")
         dimage = lighten_composite(diff_images(frames, None))
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
