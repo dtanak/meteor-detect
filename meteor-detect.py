@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import numpy as np
-import cv2
+import cv2 as cv
 
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -29,27 +29,27 @@ class MeteorDetect:
     def __del__(self):
         if self.capture:
             self.capture.release()
-        cv2.destroyAllWindows()
+        cv.destroyAllWindows()
 
     # ストリームへの接続またはファイルオープン
     def connect(self):
         if self.capture:
             self.capture.release()
 
-        self.capture = cv2.VideoCapture(self.path)
+        self.capture = cv.VideoCapture(self.path)
         if not self.capture.isOpened():
             return False
 
-        self.HEIGHT = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.WIDTH  = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.HEIGHT = int(self.capture.get(cv.CAP_PROP_FRAME_HEIGHT))
+        self.WIDTH  = int(self.capture.get(cv.CAP_PROP_FRAME_WIDTH))
 
-        self.FPS = min(self.capture.get(cv2.CAP_PROP_FPS), 60)
+        self.FPS = min(self.capture.get(cv.CAP_PROP_FPS), 60)
         # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
 
         print(f"# {self.path}: ", end="")
         print(f"{self.WIDTH}x{self.HEIGHT}, {self.FPS:.3f} fps", end="")
         if self.isfile:
-            total_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            total_frames = int(self.capture.get(cv.CAP_PROP_FRAME_COUNT))
             total_time = total_frames / self.FPS
             print(f", {total_frames} frames, {total_time:.1f} sec")
         else:
@@ -66,8 +66,13 @@ class MeteorDetect:
         th.start()
 
         # キューからフレームを読み出し、流星を検出
-        self.detect_meteors(exposure, min_length, sigma)
-        self.stop()
+        try:
+            self.detect_meteors(exposure, min_length, sigma)
+        except Exception as e:
+            print(traceback.format_exc())
+            self.stop()
+            self.clear_image_queue()
+            sys.exit(1)
 
         th.join()
 
@@ -75,14 +80,9 @@ class MeteorDetect:
     def stop(self):
         self._running = False
 
-    def abort(self):
-        self.stop()
-        sys.exit(1)
-
     # フレームサイズ
     def size(self):
         return (self.WIDTH, self.HEIGHT)
-
 
     # private:
     def queue_frames(self):
@@ -114,7 +114,7 @@ class MeteorDetect:
 
     # ファイル先頭からの経過時間
     def elapsed_time(self):
-        current_pos = self.capture.get(cv2.CAP_PROP_POS_FRAMES)
+        current_pos = self.capture.get(cv.CAP_PROP_POS_FRAMES)
         current_sec = current_pos / self.FPS
         sec = int(current_sec)
         microsec = int((current_sec - sec) * 1000000)
@@ -168,9 +168,9 @@ class MeteorDetect:
                 # pre-capture frames       exposure time x 0.2
                 accmframes = self.last_frames(frames, 0.2)
 
-    # 航空機対策: 10秒以上連続しているのは怪しい。
-    # TODO: より丁寧な判定、 同時に流星も出現していたときに取り逃す。
-    # 連続性の判定を出現位置をもとにしないと、流星雨のときに困る。
+    # 航空機対策: 10秒以上連続しているものを航空機とみなす
+    # TODO: より丁寧な判定ガ必要。同時に流星も出現していたときに取り逃す。
+    # 流星雨のときに困る。出現位置をもとに連続性の判定を加えるか。
     def possible_airplane(self, t, frames):
         s = len(frames) / self.FPS
         if 10.0 <= s:
@@ -179,7 +179,8 @@ class MeteorDetect:
             return True
         return False
 
-    # 稲光対策: 輝度230以上が画面の30パーセント以上あったら稲光とみなす。
+    # 稲光対策: 輝度230以上が画面の30パーセント以上あるものを稲光とみなす
+    # TODO: 世紀の大火球を取り逃すかもしれない。
     def possible_lightning(self, t, frames):
         cimage = lighten_composite(frames)
         r = brightness_rate(cimage, 230) * 100
@@ -195,7 +196,7 @@ class MeteorDetect:
         frames = []
         for n in range(nframes):
             # 'q' キー押下でプログラム終了
-            if chr(cv2.waitKey(1) & 0xFF) == 'q':
+            if chr(cv.waitKey(1) & 0xFF) == 'q':
                 self.stop()
 
             tf = self.image_queue.get()
@@ -206,16 +207,16 @@ class MeteorDetect:
             if n == 0:
                 t = tt
             if self.opencl:
-                frame = cv2.UMat(frame)
+                frame = cv.UMat(frame)
             frames.append(frame)
         return (t, frames)
 
     def show_image(self, frames):
         cimage = lighten_composite(frames)
         cimage = self.composite_mask_to_view(cimage, self.mask)
-        cv2.imshow('meteor-detect: {}'.format(self.path), cimage)
+        cv.imshow('meteor-detect: {}'.format(self.path), cimage)
 
-    # フレームのうち後半のfraction(0 〜 1.0)
+    # フレーム配列の後半のfraction(0 〜 1.0)
     def last_frames(self, frames, fraction):
         n = len(frames)
         k = int(n * (1 - fraction))
@@ -225,10 +226,10 @@ class MeteorDetect:
     def detect_meteor_lines(self, frames, min_length, sigma):
         # (1) フレーム間の差をとり、結果を比較明合成
         diff_img = lighten_composite(diff_images(frames, None))
+
         # ※ オリジナル版は diff_images の第二引数に mask を与えて画像の
-        # 一部をマスクしていたが、矩形マスクの縁を直線として検出してしま
-        # うことがあるため、線分の始点・終点がマスク領域にあるかで判定す
-        # るように変更。
+        # 一部をマスクしていたが、矩形マスクの縁を誤検出することがあるため
+        # 判定方法を変更 -> exclude_masked_lines()
 
         # (2) Hough-transform で画像から線分を検出
         return detect_line_patterns(diff_img, min_length, sigma)
@@ -266,7 +267,7 @@ class MeteorDetect:
         dimage = lighten_composite(diff_images(frames, None))
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
-            dimage = cv2.line(dimage, (xb, yb), (xe, ye), (0, 255, 255))
+            dimage = cv.line(dimage, (xb, yb), (xe, ye), (0, 255, 255))
         dimage = self.composite_mask_to_view(dimage, self.mask)
         self.save_image(dimage, self.timename(t) + "_d.jpg")
 
@@ -274,7 +275,7 @@ class MeteorDetect:
     def composite_mask_to_view(self, i, mask):
         if mask is None:
             return i
-        return cv2.addWeighted(i, 1.0, mask, 0.2, 1.0)
+        return cv.addWeighted(i, 1.0, mask, 0.2, 1.0)
 
     # 検出ログ
     def detection_log(self, t):
@@ -297,26 +298,19 @@ class MeteorDetect:
         aimage = average(frames, self.opencl)
         self.save_image(aimage, self.timename(t) + "_s.jpg")
 
-    def save_image(self, image, path):
-        try:
-            cv2.imwrite(path, image)
-        except Exception as e:
-            print(traceback.format_exc())
-    def save_movie(self, img_list, pathname):
-        """
-        画像リストから動画を作成する。
-        Args:
-          imt_list: 画像のリスト
-          pathname: 出力ファイル名
-        """
-        try:
-            fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-            video = cv2.VideoWriter(pathname, fourcc, self.FPS, self.size())
-            for img in img_list:
-                video.write(img)
-            video.release()
-        except Exception as e:
-            print(traceback.format_exc())
+    # OpenCVで画像・動画を保存: opencv-pythonはエラー処理系がほぼザル
+    def save_image(self, cimage, path):
+        r = cv.imwrite(path, cimage)
+        if not r:
+            raise Exception('cv.imwrite', path)
+    def save_movie(self, frames, path):
+        video = cv.VideoWriter()
+        fourcc = cv.VideoWriter_fourcc('m', 'p', '4', 'v')
+        if not video.open(path, fourcc, self.FPS, self.size()):
+            raise Exception('cv.VideoWriter.open', path)
+        for frame in frames:
+            video.write(frame)
+        video.release()
 
     def timename(self, t):
         return str(Path(self.output_dir, t.strftime(self.nameformat)))
@@ -325,19 +319,23 @@ class MeteorDetect:
         # ミリセカンドまで表示
         return t.strftime("%Y-%m-%d %H:%M:%S.") + t.strftime("%f")[0:3]
 
+    def clear_image_queue(self):
+        while not self.image_queue.empty():
+            self.image_queue.get()
+
     @classmethod
+    # (ビルトインな関数がありそうな気がする)
     def local_timezone(cls):
-        # ローカルのタイムゾーン: ビルトインな関数がありそうな気がする。
         time.tzset()
         tv = int(time.time())
         zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
         return timezone(timedelta(seconds=zs))
 
-    # ファイル日時のメタデータ
+    # 動画のメタデータから日時を取得
     def find_file_date(self, u):
         try:
             date = self.mpeg_date(u)
-            # Python 3.9の fromisoformat は"Z" timezoneで例外を起こす。
+            # Python 3.9の fromisoformat は"Z" timezoneで例外
             date = date.replace('Z', '+00:00')
             return datetime.fromisoformat(date)
         except Exception as e:
@@ -380,7 +378,7 @@ def median(list_images, opencl=False):
     img_list = []
     if opencl:
         for img in list_images:
-            img_list.append(cv2.UMat.get(img))
+            img_list.append(cv.UMat.get(img))
     else:
         for img in list_images:
             img_list.append(img)
@@ -392,7 +390,7 @@ def average(list_images, opencl=False):
     img_list = []
     if opencl:
         for img in list_images:
-            img_list.append(cv2.UMat.get(img))
+            img_list.append(cv.UMat.get(img))
     else:
         for img in list_images:
             img_list.append(img)
@@ -411,7 +409,7 @@ def lighten_composite(img_list):
     output = img_list[0]
 
     for img in img_list[1:]:
-        output = cv2.max(img, output)
+        output = cv.max(img, output)
 
     return output
 
@@ -428,9 +426,9 @@ def diff_images(img_list, mask):
     diff_list = []
     for img1, img2 in zip(img_list[:-2], img_list[1:]):
         if mask is not None:
-            img1 = cv2.bitwise_or(img1, mask)
-            img2 = cv2.bitwise_or(img2, mask)
-        diff_list.append(cv2.subtract(img1, img2))
+            img1 = cv.bitwise_or(img1, mask)
+            img2 = cv.bitwise_or(img2, mask)
+        diff_list.append(cv.subtract(img1, img2))
 
     return diff_list
 
@@ -443,17 +441,17 @@ def detect_line_patterns(img, min_length, sigma=0):
       検出結果
     """
     blur_size = (5, 5)
-    blur = cv2.GaussianBlur(img, blur_size, sigma)
-    canny = cv2.Canny(blur, 100, 200, 3)
+    blur = cv.GaussianBlur(img, blur_size, sigma)
+    canny = cv.Canny(blur, 100, 200, 3)
 
     # The Hough-transform algo:
-    return cv2.HoughLinesP(
+    return cv.HoughLinesP(
         canny, 1, np.pi/180, 25, minLineLength=min_length, maxLineGap=5)
 
 # 高輝度画素の比率
 def brightness_rate(i, th):
-    hsv = cv2.cvtColor(i, cv2.COLOR_RGB2HSV)
-    h, s, v = cv2.split(hsv)
+    hsv = cv.cvtColor(i, cv.COLOR_RGB2HSV)
+    h, s, v = cv.split(hsv)
     n = 0
     k = 0
     for r in v.squeeze():
@@ -545,8 +543,8 @@ if __name__ == '__main__':
                 detector.start(a.exposure, a.min_length, a.sigma)
             if not a.re_connect or detector.isfile:
                 break
-            time.sleep(5)
             # re_connect オプション指定時は5秒スリープ後に再接続
+            time.sleep(5)
 
     # YouTubeのビデオストリームURLの取得
     def get_youtube_stream(u, property):
@@ -557,19 +555,14 @@ if __name__ == '__main__':
             import pafy
 
         print(f"# connecting to YouTube: {u}")
-
         for retry in range(10):
             try:
                 video = pafy.new(u, ydl_opts={'nocheckcertificate': True})
+                for v in video.videostreams:
+                    if str(v) == property:
+                        return v.url
             except Exception as e:
                 print(str(e))
-                traceback.print_exc(file=sys.stdout)
-                sys.exit(1)
-            # video = pafy.new(u)
-            # best = video.getbest(preftype="mp4")
-            for v in video.videostreams:
-                if str(v) == property:
-                    return v.url
             print(f"# retrying to connect to YouTube: {retry}")
             time.sleep(2)
         print(f"# {u}: retry count exceeded, exit.")
@@ -586,12 +579,14 @@ if __name__ == '__main__':
             p, bp, ep = t
             rect = np.zeros((h, w, 3), np.uint8)
             if p == '+':
-                rect = cv2.rectangle(rect, (0, 0), size, (255, 255, 255), -1)
-                rect = cv2.rectangle(rect, bp, ep, (0, 0, 0), -1)
+                rect = cv.rectangle(rect, (0, 0), size, (255, 255, 255), -1)
+                rect = cv.rectangle(rect, bp, ep, (0, 0, 0), -1)
             if p == '-':
-                rect = cv2.rectangle(rect, bp, ep, (255, 255, 255), -1)
+                rect = cv.rectangle(rect, bp, ep, (255, 255, 255), -1)
             if p == '@':
-                rect = cv2.imread(bp)
+                rect = cv.imread(bp)
+                if rect is None:
+                    raise Exception('cv.imread', bp)
             mask = lighten_composite([mask, rect])
         return mask
     # マスク指定文字列をパース
