@@ -73,10 +73,11 @@ class MeteorDetect:
 
     # 検出終了
     def stop(self):
-        if self.image_queue:
-            while not self.image_queue.empty():
-                self.image_queue.get()
         self._running = False
+
+    def abort(self):
+        self.stop()
+        sys.exit(1)
 
     # フレームサイズ
     def size(self):
@@ -195,10 +196,10 @@ class MeteorDetect:
         for n in range(nframes):
             # 'q' キー押下でプログラム終了
             if chr(cv2.waitKey(1) & 0xFF) == 'q':
-                return None
+                self.stop()
 
             tf = self.image_queue.get()
-            # キューから None (EOF) がでてきたらプログラム終了
+            # キューから None (EOF) がでてきたら検出終了
             if tf == None:
                 return None
             (tt, frame) = tf
@@ -520,10 +521,13 @@ if __name__ == '__main__':
 
         # シグナルを受信したら終了
         def signal_receptor(signum, frame):
-            a.re_connect = False
+            if signum is not int(signal.SIGHUP):
+                a.re_connect = False
+            # SIGHUP かつ re_connect が Trueのとき再接続
             detector.stop()
-        signal.signal(signal.SIGHUP, signal_receptor)
-        signal.signal(signal.SIGINT, signal_receptor)
+        signal.signal(signal.SIGHUP,  signal_receptor)
+        signal.signal(signal.SIGINT,  signal_receptor)
+        signal.signal(signal.SIGTERM, signal_receptor)
 
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
