@@ -5,6 +5,7 @@ import cv2 as cv
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import math
 import time
 import threading
 import queue
@@ -13,45 +14,47 @@ import sys
 
 class MeteorDetect:
     def __init__(self, path):
-        self.path = path
+        # public:
         self.isfile = os.path.isfile(path)
-        self.opencl = False
+        self.show_window = False
         self.output_dir = Path(".")
         self.nameformat = "%Y%m%d%H%M%S"
-        self.debug = False
-        self.show_window = False
         self.time_to = None
-        self.mask = None
-        self.capture = None
-        self._interrupted = False
         self.basetime = None
+        self.mask = None
+        self.opencl = False
+        self.debug = False
+        # private:
+        self._path = path
+        self._interrupted = False
+        self._capture = None
 
     def __del__(self):
-        if self.capture:
-            self.capture.release()
+        if self._capture:
+            self._capture.release()
         cv.destroyAllWindows()
 
     # ストリームへの接続またはファイルオープン
     def connect(self):
-        if self.capture:
-            self.capture.release()
+        if self._capture:
+            self._capture.release()
 
-        self.capture = cv.VideoCapture(self.path)
+        self._capture = cv.VideoCapture(self._path)
         if self._interrupted:
             raise KeyboardInterrupt
-        if not self.capture.isOpened():
+        if not self._capture.isOpened():
             return False
 
-        self.HEIGHT = int(self.capture.get(cv.CAP_PROP_FRAME_HEIGHT))
-        self.WIDTH  = int(self.capture.get(cv.CAP_PROP_FRAME_WIDTH))
+        self.HEIGHT = int(self._capture.get(cv.CAP_PROP_FRAME_HEIGHT))
+        self.WIDTH  = int(self._capture.get(cv.CAP_PROP_FRAME_WIDTH))
 
-        self.FPS = min(self.capture.get(cv.CAP_PROP_FPS), 60)
+        self.FPS = min(self._capture.get(cv.CAP_PROP_FPS), 60)
         # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
 
-        print(f"# {self.path}: ", end="")
+        print(f"# {self._path}: ", end="")
         print(f"{self.WIDTH}x{self.HEIGHT}, {self.FPS:.3f} fps", end="")
         if self.isfile:
-            total_frames = int(self.capture.get(cv.CAP_PROP_FRAME_COUNT))
+            total_frames = int(self._capture.get(cv.CAP_PROP_FRAME_COUNT))
             total_time = total_frames / self.FPS
             print(f", {total_frames} frames, {total_time:.1f} sec")
         else:
@@ -92,6 +95,9 @@ class MeteorDetect:
     def queue_frames(self):
         tz = self.local_tz()
 
+        if self.time_to:
+            self.time_to = self.apply_tz(self.time_to, tz)
+
         if self.isfile:
             if self.basetime is None:
                 self.basetime = datetime.fromisoformat("0001-01-01T00:00:00")
@@ -99,12 +105,9 @@ class MeteorDetect:
         else:
             self.basetime = datetime.now(tz)
 
-        if self.time_to:
-            self.time_to = self.apply_tz(self.time_to, tz)
-
         t = self.basetime
         while self._running_th:
-            r, frame = self.capture.read()
+            r, frame = self._capture.read()
             if not r: # EOF or lost connection
                 break
             self.image_queue.put((t, frame))
@@ -119,7 +122,7 @@ class MeteorDetect:
 
     # ファイル先頭からの経過時間
     def elapsed_time(self):
-        current_pos = self.capture.get(cv.CAP_PROP_POS_FRAMES)
+        current_pos = self._capture.get(cv.CAP_PROP_POS_FRAMES)
         current_sec = current_pos / self.FPS
         sec = int(current_sec)
         microsec = int((current_sec - sec) * 1000000)
@@ -158,11 +161,11 @@ class MeteorDetect:
                     self.dump_detected_lines(t, frames, lines)
             else:
                 if td is not None:
-                    if not self.possible_airplane(td, accmframes) and \
+                    if not self.possible_aircraft(td, accmframes) and \
                        not self.possible_lightning(td, accmframes):
                         self.detection_log(td)
                         self.save_frames(td, accmframes)
-                    # 航空機・稲光判定は性質上累積フレームの情報が必要
+                        # 航空機・稲光判定には累積フレームを用いる
                     td = None
                 accmframes = self.pre_capture(frames, 0.2)
                 exposure_ = exposure
@@ -171,11 +174,11 @@ class MeteorDetect:
     # 航空機対策: 7秒以上連続しているものを航空機とみなす
     # TODO: より丁寧な判定が必要。同時に流星も出現していたときに取り逃す。
     # 流星雨のときに困る。出現位置をもとに連続性の判定を加えるか。
-    def possible_airplane(self, t, frames):
+    def possible_aircraft(self, t, frames):
         s = len(frames) / self.FPS
         if 7.0 <= s:
             ds = self.datetime_str(t)
-            print(f"X {ds} {self.path} {s:4.1f} sec: possible airplane")
+            print(f"X {ds} {self._path} {s:4.1f} sec: possible aircraft")
             return True
         return False
 
@@ -186,7 +189,7 @@ class MeteorDetect:
         r = brightness_rate(cimage, 230) * 100
         if 30.0 <= r:
             ds = self.datetime_str(t)
-            print(f"X {ds} {self.path} {r:4.1f} %: possible lightning")
+            print(f"X {ds} {self._path} {r:4.1f} %: possible lightning")
             return True
         return False
 
@@ -219,7 +222,7 @@ class MeteorDetect:
         # pimage = average(frames)
         pimage = lighten_composite(frames)
         pimage = self.composite_mask_to_view(pimage, self.mask)
-        cv.imshow('meteor-detect: {}'.format(self.path), pimage)
+        cv.imshow('meteor-detect: {}'.format(self._path), pimage)
 
     def pre_capture(self, frames, sec):
         n = len(frames)
@@ -278,15 +281,17 @@ class MeteorDetect:
             print('M {} {:8.3f}'.format(ds, et))
         else:
             # 接続先のURLを付与
-            print('M {} {}'.format(ds, self.path))
+            print('M {} {}'.format(ds, self._path))
 
     # 検出結果のダンプ。デバッグ用
     def dump_detected_lines(self, t, frames, lines):
         ds = self.datetime_str(t)
         n = len(lines)
-        print(f"D {ds} {self.path} {n} lines:")
+        print(f"D {ds} {self._path} {n} lines:")
         for line in lines:
-            print(f"D  {line}")
+            xb, yb, xe, ye = line.squeeze()
+            length = math.sqrt((xe - xb) **2 + (ye - yb) **2)
+            print(f"D  {line} {length:.1f}")
         dimage = lighten_composite(diff_images(frames, None))
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
@@ -294,7 +299,7 @@ class MeteorDetect:
         dimage = self.composite_mask_to_view(dimage, self.mask)
         self.save_image(dimage, self.timename(t) + "_d.jpg")
 
-    # 取得画像にマスク領域を合成して可視化
+    # マスク領域を合成して可視化
     def composite_mask_to_view(self, i, mask):
         if mask is None:
             return i
@@ -328,9 +333,8 @@ class MeteorDetect:
     def timename(self, t):
         return str(Path(self.output_dir, t.strftime(self.nameformat)))
 
-    # 出力ログ用の日時部分
+    # 出力ログ用の日時部分。ミリセカンドまで表示
     def datetime_str(self, t):
-        # ミリセカンドまで表示
         return t.strftime("%Y-%m-%d %H:%M:%S.") + t.strftime("%f")[0:3]
 
     @classmethod
@@ -343,9 +347,12 @@ class MeteorDetect:
 
     @classmethod
     def apply_tz(cls, t, tz):
-        if t.tzinfo is None: # naive
+        # datetime に timezone を適用
+        # タイムゾーン情報なし(naive): tz を付与
+        # タイムゾーン情報あり(aware): tz で換算
+        if t.tzinfo is None:
             return t.replace(tzinfo=tz)
-        else: # aware
+        else:
             return t.astimezone(tz)
 
 '''
@@ -480,12 +487,12 @@ if __name__ == '__main__':
 
         detector.debug = a.debug
         detector.show_window = a.show_window
-        detector.nameformat = a.nameformat
         detector.output_dir = Path(a.output_dir)
+        detector.nameformat = a.nameformat
         detector.time_to = next_hhmm(a.time_to)
         if os.path.isfile(a.path):
             detector.basetime = find_datetime_in_metadata(a.path)
-        if a.basetime is not None:
+        if a.basetime:
             detector.basetime = datetime.fromisoformat(a.basetime)
 
         def signal_receptor(signum, frame):
@@ -528,7 +535,7 @@ if __name__ == '__main__':
             '-m', '--mask', default=None, help="exclusion mask")
         parser.add_argument('-e', '--exposure', type=float,
                             default=1, help='露出時間(second)')
-        parser.add_argument('--min_length', type=int, default=30,
+        parser.add_argument('--min_length', type=int, default=15,
                             help="minLineLength of HoghLinesP")
         parser.add_argument('--sigma', type=float, default=0.0,
                             help="sigma parameter of GaussianBlur()")
