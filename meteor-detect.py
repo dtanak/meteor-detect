@@ -24,6 +24,7 @@ class MeteorDetect:
         self.mask = None
         self.capture = None
         self._interrupted = False
+        self.basetime = None
 
     def __del__(self):
         if self.capture:
@@ -36,6 +37,8 @@ class MeteorDetect:
             self.capture.release()
 
         self.capture = cv.VideoCapture(self.path)
+        if self._interrupted:
+            raise KeyboardInterrupt
         if not self.capture.isOpened():
             return False
 
@@ -65,17 +68,14 @@ class MeteorDetect:
         th = threading.Thread(target=self.queue_frames)
         th.start()
 
-        # キューからフレームを読み出し、流星を検出
         try:
+            # キューからフレームを読み出し、流星を検出
             self.detect_meteors(exposure, min_length, sigma)
-        except Exception as e:
+        finally:
+            # 例外終了時もサブスレッドを確実に終了させる。
             self.stop()
-            self.clear_queue()
-            # サブスレッドが image_queue.put() でブロックするのを回避
+            self.clear_queue() # image_queue.put()のブロックを回避
             th.join()
-            raise e
-
-        th.join()
 
     # 検出終了
     def stop(self):
@@ -90,15 +90,19 @@ class MeteorDetect:
 
     # private:
     def queue_frames(self):
-        tz = self.local_timezone()
+        tz = self.local_tz()
 
         if self.isfile:
-            t = self.find_file_date(self.path).astimezone(tz)
+            if self.basetime is None:
+                self.basetime = datetime.fromisoformat("0001-01-01T00:00:00")
+            self.basetime = self.apply_tz(self.basetime, tz)
         else:
-            t = datetime.now(tz)
-        self.base_time = t
+            self.basetime = datetime.now(tz)
 
-        print("# {} start".format(self.datetime_str(t)))
+        if self.time_to:
+            self.time_to = self.apply_tz(self.time_to, tz)
+
+        t = self.basetime
         while self._running_th:
             r, frame = self.capture.read()
             if not r: # EOF or lost connection
@@ -106,14 +110,12 @@ class MeteorDetect:
             self.image_queue.put((t, frame))
 
             if self.isfile:
-                t = self.base_time + self.elapsed_time()
+                t = self.basetime + self.elapsed_time()
             else:
                 t = datetime.now(tz)
                 if self.time_to and self.time_to < t:
                     break
-
         self.image_queue.put(None)
-        print("# {} stop".format(self.datetime_str(t)))
 
     # ファイル先頭からの経過時間
     def elapsed_time(self):
@@ -135,14 +137,16 @@ class MeteorDetect:
             (t, frames) = tf
             accmframes += frames
 
+            if t == self.basetime:
+                print("# {} start".format(self.datetime_str(t)))
+                if self.debug and self.mask is not None:
+                    self.save_image(self.mask, self.timename(t) + "_m.png")
+
             if self.show_window:
                 self.show_image(frames)
 
-            if self.debug:
-                if t == self.base_time and self.mask is not None:
-                    self.save_image(self.mask, self.timename(t) + "_m.png")
-                if not self.isfile:
-                    self.monitor_sky(t, frames)
+            if not self.isfile:
+                self.monitor_sky(t, frames)
 
             lines = self.detect_meteor_lines(frames, min_length, sigma)
             if lines is not None:
@@ -162,6 +166,7 @@ class MeteorDetect:
                     td = None
                 accmframes = self.pre_capture(frames, 0.2)
                 exposure_ = exposure
+        print("# {} stop".format(self.datetime_str(t)))
 
     # 航空機対策: 7秒以上連続しているものを航空機とみなす
     # TODO: より丁寧な判定が必要。同時に流星も出現していたときに取り逃す。
@@ -190,11 +195,9 @@ class MeteorDetect:
         nframes = round(self.FPS * exposure)
         frames = []
         for n in range(nframes):
-            # 'q' キー押下でプログラム終了
-            if chr(cv.waitKey(1) & 0xFF) == 'q':
-                self.user_interrupt()
-            if self._interrupted:
-                raise Exception('user_interrupt')
+            # 'q' キー押下やシグナルの受信も KeyboardInterrupt として扱う
+            if chr(cv.waitKey(1) & 0xFF) == 'q' or self._interrupted:
+                raise KeyboardInterrupt
 
             tf = self.image_queue.get()
             # キューから None (EOF) がでてきたら検出終了
@@ -236,16 +239,17 @@ class MeteorDetect:
 
         # (2) Hough-transform で画像から線分を検出
         lines = detect_line_patterns(diff_img, min_length, sigma)
-        return self.exclude_masked_lines(self.mask, lines)
+
+        # (3) マスク領域のチェック。始点・終点のどちらかが領域外にあれば有効
+        if lines is not None:
+            lines = self.exclude_masked_lines(self.mask, lines)
+        return lines
 
     # マスクされた線分を除外
     def exclude_masked_lines(self, mask, lines):
-        if lines is None:
-            return None
         r = []
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
-            # 始点、終点のどちらかがマスクされていなければ有効とする
             if self.valid_pos(mask, xb, yb) or self.valid_pos(mask, xe, ye):
                 r.append(line)
         if len(r) == 0:
@@ -270,7 +274,7 @@ class MeteorDetect:
         ds = self.datetime_str(t)
         if self.isfile:
             # ファイル先頭からの経過時間を付与
-            et = (t - self.base_time).total_seconds()
+            et = (t - self.basetime).total_seconds()
             print('M {} {:8.3f}'.format(ds, et))
         else:
             # 接続先のURLを付与
@@ -330,33 +334,19 @@ class MeteorDetect:
         return t.strftime("%Y-%m-%d %H:%M:%S.") + t.strftime("%f")[0:3]
 
     @classmethod
-    def local_timezone(cls):
+    def local_tz(cls):
         time.tzset()
         tv = int(time.time())
         zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
         return timezone(timedelta(seconds=zs))
     # (ビルトインな関数がありそうな気がする)
 
-    # 動画のメタデータから日時を取得
-    def find_file_date(self, u):
-        try:
-            date = self.mpeg_date(u)
-            # Python 3.9の fromisoformat は"Z" timezoneで例外
-            date = date.replace('Z', '+00:00')
-            return datetime.fromisoformat(date)
-        except Exception:
-            return datetime.fromisoformat("2001-01-01T00:00:00+00:00")
-    def mpeg_date(self, path):
-        import subprocess
-        import re
-
-        # ffmpegコマンドを使い動画ファイルの creation_time を取得
-        command = ["ffmpeg", "-i", path]
-        p = subprocess.run(command, capture_output=True, text=True)
-        for t in p.stderr.split("\n"):
-            if "creation_time" in t:
-                return re.sub('.*creation_time *: *', '', t)
-        return None
+    @classmethod
+    def apply_tz(cls, t, tz):
+        if t.tzinfo is None: # naive
+            return t.replace(tzinfo=tz)
+        else: # aware
+            return t.astimezone(tz)
 
 '''
 def composite(list_images):
@@ -472,6 +462,47 @@ if __name__ == '__main__':
     import signal
 
     def main():
+        a = parse_arguments()
+
+        if a.suppress_warning:
+            # stderrを dev/null に出力する。
+            fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(fd, 2)
+
+        # 行毎に標準出力のバッファをflushする。
+        sys.stdout.reconfigure(line_buffering=True)
+
+        # YouTubeの場合、Full HDのビデオストリームURLを使用
+        if "youtube" in a.path:
+            a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
+
+        detector = MeteorDetect(a.path)
+
+        detector.debug = a.debug
+        detector.show_window = a.show_window
+        detector.nameformat = a.nameformat
+        detector.output_dir = Path(a.output_dir)
+        detector.time_to = next_hhmm(a.time_to)
+        if os.path.isfile(a.path):
+            detector.basetime = find_datetime_in_metadata(a.path)
+        if a.basetime is not None:
+            detector.basetime = datetime.fromisoformat(a.basetime)
+
+        def signal_receptor(signum, frame):
+            detector.user_interrupt()
+        signal.signal(signal.SIGTERM, signal_receptor)
+
+        while True:
+            if detector.connect():
+                # 接続先のフレームサイズをもとにマスク画像を生成
+                detector.mask = make_exclusion_mask(a.mask, detector.size())
+                detector.start(a.exposure, a.min_length, a.sigma)
+            if not a.re_connect or detector.isfile:
+                break
+            # re_connect オプション指定時5秒スリープ後に再接続
+            time.sleep(5)
+
+    def parse_arguments():
         parser = argparse.ArgumentParser(add_help=False)
 
         # Usage: meteor-detect [options] path
@@ -484,6 +515,8 @@ if __name__ == '__main__':
                             help='画面表示')
         parser.add_argument('-r', '--re_connect', action='store_true',
                             help='try to re-connect when lost connection')
+        parser.add_argument('--basetime', default=None,
+                            help='(ファイルモードの)想定開始日時')
         parser.add_argument('-t', '--time_to', default=None,
                             help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
         parser.add_argument('-o', '--output_dir', default=".",
@@ -512,47 +545,25 @@ if __name__ == '__main__':
         parser.add_argument('--help', action='help',
                             help='show this help message and exit')
 
-        a = parser.parse_args()
+        return parser.parse_args()
 
-        if a.suppress_warning:
-            # stderrを dev/null に出力する。
-            fd = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(fd, 2)
+    def find_datetime_in_metadata(path):
+        import subprocess
+        import re
 
-        # YouTubeの場合、Full HDのビデオストリームURLを使用
-        if "youtube" in a.path:
-            a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
-
-        # 行毎に標準出力のバッファをflushする。
-        sys.stdout.reconfigure(line_buffering=True)
-
-        detector = MeteorDetect(a.path)
-
-        detector.debug = a.debug
-        detector.show_window = a.show_window
-        detector.nameformat = a.nameformat
-        detector.output_dir = Path(a.output_dir)
-        detector.time_to = next_hhmm(a.time_to)
-
-        def signal_receptor(signum, frame):
-            if signum == int(signal.SIGHUP):
-                detector.stop()
-                # SIGHUPのときはセッションを閉じて再接続
-            else:
-                detector.user_interrupt()
-        signal.signal(signal.SIGHUP , signal_receptor)
-        signal.signal(signal.SIGINT , signal_receptor)
-        signal.signal(signal.SIGTERM, signal_receptor)
-
-        while True:
-            if detector.connect():
-                # 接続先のフレームサイズをもとにマスク画像を生成
-                detector.mask = make_exclusion_mask(a.mask, detector.size())
-                detector.start(a.exposure, a.min_length, a.sigma)
-            if not a.re_connect or detector.isfile:
-                break
-            # re_connect オプション指定時5秒スリープ後に再接続
-            time.sleep(5)
+        try:
+            # ffmpegコマンドで動画ファイルの creation_time を取得
+            command = ["ffmpeg", "-i", path]
+            p = subprocess.run(command, capture_output=True, text=True)
+            for s in p.stderr.split("\n"):
+                if "creation_time" in s:
+                    ts = re.sub('.*creation_time *: *', '', s)
+                    # Python 3.9は"Z" timezoneで例外発生
+                    ts = ts.replace('Z', '+00:00')
+                    return datetime.fromisoformat(ts)
+        except:
+            pass
+        return None
 
     # YouTubeのビデオストリームURLの取得
     def get_youtube_stream(u, property):
@@ -628,7 +639,7 @@ if __name__ == '__main__':
             r.append((u[0], bp, ep))
         return r
 
-    # "HHMM" 形式を現在時刻以降の最初の aware な datetimeに変換
+    # "HHMM" 形式を現在時刻以降の最初のdatetimeに変換
     def next_hhmm(hhmm):
         if hhmm is None:
             return None
@@ -637,12 +648,9 @@ if __name__ == '__main__':
         t = datetime(n.year, n.month, n.day, t.hour, t.minute)
         if t < n:
             t += timedelta(hours=24)
-        return t.replace(tzinfo=MeteorDetect.local_timezone())
+        return t
 
     try:
         main()
-    except Exception as e:
-        if not "user_interrupt" in str(e):
-            import traceback
-            print(traceback.format_exc())
+    except KeyboardInterrupt:
         sys.exit(1)
