@@ -3,15 +3,13 @@
 import numpy as np
 import cv2 as cv
 
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
-import sys
-import os
+from pathlib import Path
 import time
-import argparse
 import threading
 import queue
-import traceback
+import os
+import sys
 
 class MeteorDetect:
     def __init__(self, path):
@@ -25,6 +23,7 @@ class MeteorDetect:
         self.time_to = None
         self.mask = None
         self.capture = None
+        self._interrupted = False
 
     def __del__(self):
         if self.capture:
@@ -61,6 +60,7 @@ class MeteorDetect:
         self.output_dir.mkdir(exist_ok=True)
 
         # サブスレッドでフレームをキューに流し込む
+        self._running_th = True
         self.image_queue = queue.Queue(maxsize=200)
         th = threading.Thread(target=self.queue_frames)
         th.start()
@@ -69,18 +69,22 @@ class MeteorDetect:
         try:
             self.detect_meteors(exposure, min_length, sigma)
         except Exception as e:
-            print(traceback.format_exc())
             self.stop()
-            self.clear_image_queue()
-            sys.exit(1)
+            self.clear_queue()
+            # サブスレッドが image_queue.put() でブロックするのを回避
+            th.join()
+            raise e
 
         th.join()
 
     # 検出終了
     def stop(self):
-        self._running = False
+        self._running_th = False
 
-    # フレームサイズ
+    # 検出中断
+    def user_interrupt(self):
+        self._interrupted = True
+
     def size(self):
         return (self.WIDTH, self.HEIGHT)
 
@@ -95,8 +99,7 @@ class MeteorDetect:
         self.base_time = t
 
         print("# {} start".format(self.datetime_str(t)))
-        self._running = True
-        while self._running:
+        while self._running_th:
             r, frame = self.capture.read()
             if not r: # EOF or lost connection
                 break
@@ -122,14 +125,18 @@ class MeteorDetect:
 
     def detect_meteors(self, exposure, min_length, sigma):
         accmframes = [] # 流星出現直前からの累積フレーム
-        postexposures = 0  # 出現後の予備露出数
         td = None  # 流星検出時刻。連続検出時は最初の検出時刻を保持。
+        exposure_ = exposure
         while True:
-            # キューから exposure 秒分のフレームを取り出す
-            tf = self.dequeue_frames(exposure)
+            # キューから exposure_ 秒分のフレームを取り出す
+            tf = self.dequeue_frames(exposure_)
             if tf is None:
                 break
             (t, frames) = tf
+            accmframes += frames
+
+            if self.show_window:
+                self.show_image(frames)
 
             if self.debug:
                 if t == self.base_time and self.mask is not None:
@@ -137,38 +144,26 @@ class MeteorDetect:
                 if not self.isfile:
                     self.monitor_sky(t, frames)
 
-            if self.show_window:
-                self.show_image(frames)
-
             lines = self.detect_meteor_lines(frames, min_length, sigma)
             if lines is not None:
-                lines = self.exclude_masked_lines(self.mask, lines)
-
-            accmframes += frames
-            if lines is not None:
-                # detected frames          exposure time x 1
                 if td is None:
                     td = t
-                postexposures = 3        # exposure time x (2 + 1)
-                # 連続検出時も postexposuresをリセット
+                    exposure_ = exposure * 2
+                    # 検出条件をゆるめて追跡(航空機判定のため)。
                 if self.debug:
                     self.dump_detected_lines(t, frames, lines)
-            elif 1 < postexposures:
-                # post-capture frames      exposure time x 2
-                postexposures -= 1
             else:
-                # post-capture last frames exposure time x 1
                 if td is not None:
-                    if not self.possible_lightning(td, accmframes) and \
-                       not self.possible_airplane(td, accmframes):
+                    if not self.possible_airplane(td, accmframes) and \
+                       not self.possible_lightning(td, accmframes):
                         self.detection_log(td)
                         self.save_frames(td, accmframes)
                     # 航空機・稲光判定は性質上累積フレームの情報が必要
                     td = None
-                # pre-capture frames       exposure time x 0.2
-                accmframes = self.last_frames(frames, 0.2)
+                accmframes = self.pre_capture(frames, 0.2)
+                exposure_ = exposure
 
-    # 航空機対策: 10秒以上連続しているものを航空機とみなす
+    # 航空機対策: 7秒以上連続しているものを航空機とみなす
     # TODO: より丁寧な判定が必要。同時に流星も出現していたときに取り逃す。
     # 流星雨のときに困る。出現位置をもとに連続性の判定を加えるか。
     def possible_airplane(self, t, frames):
@@ -197,7 +192,9 @@ class MeteorDetect:
         for n in range(nframes):
             # 'q' キー押下でプログラム終了
             if chr(cv.waitKey(1) & 0xFF) == 'q':
-                self.stop()
+                self.user_interrupt()
+            if self._interrupted:
+                raise Exception('user_interrupt')
 
             tf = self.image_queue.get()
             # キューから None (EOF) がでてきたら検出終了
@@ -211,15 +208,21 @@ class MeteorDetect:
             frames.append(frame)
         return (t, frames)
 
-    def show_image(self, frames):
-        cimage = lighten_composite(frames)
-        cimage = self.composite_mask_to_view(cimage, self.mask)
-        cv.imshow('meteor-detect: {}'.format(self.path), cimage)
+    def clear_queue(self):
+        while not self.image_queue.empty():
+            self.image_queue.get()
 
-    # フレーム配列の後半のfraction(0 〜 1.0)
-    def last_frames(self, frames, fraction):
+    def show_image(self, frames):
+        # pimage = average(frames)
+        pimage = lighten_composite(frames)
+        pimage = self.composite_mask_to_view(pimage, self.mask)
+        cv.imshow('meteor-detect: {}'.format(self.path), pimage)
+
+    def pre_capture(self, frames, sec):
         n = len(frames)
-        k = int(n * (1 - fraction))
+        k = (int)(n - sec * self.FPS)
+        if k < 0:
+            k = 0
         return frames[k:]
 
     # 線分(移動天体)を検出
@@ -232,10 +235,13 @@ class MeteorDetect:
         # 判定方法を変更 -> exclude_masked_lines()
 
         # (2) Hough-transform で画像から線分を検出
-        return detect_line_patterns(diff_img, min_length, sigma)
+        lines = detect_line_patterns(diff_img, min_length, sigma)
+        return self.exclude_masked_lines(self.mask, lines)
 
     # マスクされた線分を除外
     def exclude_masked_lines(self, mask, lines):
+        if lines is None:
+            return None
         r = []
         for line in lines:
             xb, yb, xe, ye = line.squeeze()
@@ -253,11 +259,22 @@ class MeteorDetect:
         b, g, r = pv.squeeze()
         return b == 0 and g == 0 and r == 0
 
-    # 画像・動画の保存
+    # 検出動画・画像の保存
     def save_frames(self, t, frames):
         cimage = lighten_composite(frames)
         self.save_image(cimage, self.timename(t) + ".jpg")
         self.save_movie(frames, self.timename(t) + ".mp4")
+
+    # 検出ログ
+    def detection_log(self, t):
+        ds = self.datetime_str(t)
+        if self.isfile:
+            # ファイル先頭からの経過時間を付与
+            et = (t - self.base_time).total_seconds()
+            print('M {} {:8.3f}'.format(ds, et))
+        else:
+            # 接続先のURLを付与
+            print('M {} {}'.format(ds, self.path))
 
     # 検出結果のダンプ。デバッグ用
     def dump_detected_lines(self, t, frames, lines):
@@ -273,22 +290,11 @@ class MeteorDetect:
         dimage = self.composite_mask_to_view(dimage, self.mask)
         self.save_image(dimage, self.timename(t) + "_d.jpg")
 
-    # マスク領域を可視化
+    # 取得画像にマスク領域を合成して可視化
     def composite_mask_to_view(self, i, mask):
         if mask is None:
             return i
         return cv.addWeighted(i, 1.0, mask, 0.2, 1.0)
-
-    # 検出ログ
-    def detection_log(self, t):
-        ds = self.datetime_str(t)
-        if self.isfile:
-            # ファイル先頭からの経過時間を付与
-            et = (t - self.base_time).total_seconds()
-            print('M {} {:8.3f}'.format(ds, et))
-        else:
-            # 接続先のURLを付与
-            print('M {} {}'.format(ds, self.path))
 
     # 毎正時のスカイモニター
     def monitor_sky(self, t, frames):
@@ -314,24 +320,22 @@ class MeteorDetect:
             video.write(frame)
         video.release()
 
+    # 出力ファイル名の共通部分
     def timename(self, t):
         return str(Path(self.output_dir, t.strftime(self.nameformat)))
 
+    # 出力ログ用の日時部分
     def datetime_str(self, t):
         # ミリセカンドまで表示
         return t.strftime("%Y-%m-%d %H:%M:%S.") + t.strftime("%f")[0:3]
 
-    def clear_image_queue(self):
-        while not self.image_queue.empty():
-            self.image_queue.get()
-
     @classmethod
-    # (ビルトインな関数がありそうな気がする)
     def local_timezone(cls):
         time.tzset()
         tv = int(time.time())
         zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
         return timezone(timedelta(seconds=zs))
+    # (ビルトインな関数がありそうな気がする)
 
     # 動画のメタデータから日時を取得
     def find_file_date(self, u):
@@ -340,7 +344,7 @@ class MeteorDetect:
             # Python 3.9の fromisoformat は"Z" timezoneで例外
             date = date.replace('Z', '+00:00')
             return datetime.fromisoformat(date)
-        except Exception as e:
+        except Exception:
             return datetime.fromisoformat("2001-01-01T00:00:00+00:00")
     def mpeg_date(self, path):
         import subprocess
@@ -519,33 +523,35 @@ if __name__ == '__main__':
         if "youtube" in a.path:
             a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
 
-        # シグナルを受信したら終了
-        def signal_receptor(signum, frame):
-            if signum is not int(signal.SIGHUP):
-                a.re_connect = False
-            # SIGHUP かつ re_connect が Trueのとき再接続
-            detector.stop()
-        signal.signal(signal.SIGHUP,  signal_receptor)
-        signal.signal(signal.SIGINT,  signal_receptor)
-        signal.signal(signal.SIGTERM, signal_receptor)
-
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
 
         detector = MeteorDetect(a.path)
+
         detector.debug = a.debug
         detector.show_window = a.show_window
         detector.nameformat = a.nameformat
         detector.output_dir = Path(a.output_dir)
         detector.time_to = next_hhmm(a.time_to)
+
+        def signal_receptor(signum, frame):
+            if signum == int(signal.SIGHUP):
+                detector.stop()
+                # SIGHUPのときはセッションを閉じて再接続
+            else:
+                detector.user_interrupt()
+        signal.signal(signal.SIGHUP , signal_receptor)
+        signal.signal(signal.SIGINT , signal_receptor)
+        signal.signal(signal.SIGTERM, signal_receptor)
+
         while True:
             if detector.connect():
                 # 接続先のフレームサイズをもとにマスク画像を生成
-                detector.mask = exclusion_mask(a.mask, detector.size())
+                detector.mask = make_exclusion_mask(a.mask, detector.size())
                 detector.start(a.exposure, a.min_length, a.sigma)
             if not a.re_connect or detector.isfile:
                 break
-            # re_connect オプション指定時は5秒スリープ後に再接続
+            # re_connect オプション指定時5秒スリープ後に再接続
             time.sleep(5)
 
     # YouTubeのビデオストリームURLの取得
@@ -570,8 +576,7 @@ if __name__ == '__main__':
         print(f"# {u}: retry count exceeded, exit.")
         sys.exit(1)
 
-    # マスクフレームを生成
-    def exclusion_mask(a, size):
+    def make_exclusion_mask(a, size):
         if a is None:
             return None
 
@@ -581,11 +586,14 @@ if __name__ == '__main__':
             p, bp, ep = t
             rect = np.zeros((h, w, 3), np.uint8)
             if p == '+':
+                # detection area
                 rect = cv.rectangle(rect, (0, 0), size, (255, 255, 255), -1)
                 rect = cv.rectangle(rect, bp, ep, (0, 0, 0), -1)
             if p == '-':
+                # exclusion area
                 rect = cv.rectangle(rect, bp, ep, (255, 255, 255), -1)
             if p == '@':
+                # mask-image file
                 rect = cv.imread(bp)
                 if rect is None:
                     raise Exception('cv.imread', bp)
@@ -601,7 +609,8 @@ if __name__ == '__main__':
                 r.append(('+', (  12,   12), (1908, 1068)))
                 # 周辺10ピクセル付近にノイズが発生することがあるため、
                 # 4辺の12ピクセル近傍を除外する。
-                r.append(('-', (1384, 1008), (1868, 1060)))
+                # r.append(('-', (1384, 1008), (1868, 1060)))
+                r.append(('-', (1380, 1000), (1920, 1080)))
                 # 日時表示領域を除外
                 continue
             if u == 'subaru': # 朝日新聞社マウナケア天文台設置カメラ
@@ -630,4 +639,10 @@ if __name__ == '__main__':
             t += timedelta(hours=24)
         return t.replace(tzinfo=MeteorDetect.local_timezone())
 
-    main()
+    try:
+        main()
+    except Exception as e:
+        if not "user_interrupt" in str(e):
+            import traceback
+            print(traceback.format_exc())
+        sys.exit(1)
