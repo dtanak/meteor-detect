@@ -24,6 +24,7 @@ class MeteorDetect:
         self.mask = None
         self.opencl = False
         self.debug = False
+        self.exposure_extension = 2.5
         # private:
         self._path = path
         self._interrupted = False
@@ -48,8 +49,12 @@ class MeteorDetect:
         self.HEIGHT = int(self._capture.get(cv.CAP_PROP_FRAME_HEIGHT))
         self.WIDTH  = int(self._capture.get(cv.CAP_PROP_FRAME_WIDTH))
 
-        self.FPS = min(self._capture.get(cv.CAP_PROP_FPS), 60)
         # opencv-python 4.6.0.66 が大きなfps(9000)を返すことがある
+        self.FPS = min(self._capture.get(cv.CAP_PROP_FPS), 60)
+
+        # パラメータが取得できなかったら接続失敗とみなす。
+        if self.HEIGHT == 0 or self.WIDTH == 0 or self.FPS == 0:
+            return False
 
         print(f"# {self._path}: ", end="")
         print(f"{self.WIDTH}x{self.HEIGHT}, {self.FPS:.3f} fps", end="")
@@ -155,7 +160,7 @@ class MeteorDetect:
             if lines is not None:
                 if td is None:
                     td = t
-                    exposure_ = exposure * 2
+                    exposure_ = exposure * self.exposure_extension
                     # 検出条件をゆるめて追跡(航空機判定のため)。
                 if self.debug:
                     self.dump_detected_lines(t, frames, lines)
@@ -343,7 +348,9 @@ class MeteorDetect:
         tv = int(time.time())
         zs = tv - time.mktime(time.gmtime(tv)) # TZ offset in sec
         return timezone(timedelta(seconds=zs))
-    # (ビルトインな関数がありそうな気がする)
+    # TODO: きちんとしたローカルタイムゾーン取得方法があるはず。
+    # UTCとの秒数差だけというのは情報として不十分、たとえば夏時間の運用は
+    # わからない。
 
     @classmethod
     def apply_tz(cls, t, tz):
