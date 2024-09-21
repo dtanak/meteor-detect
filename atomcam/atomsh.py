@@ -8,6 +8,7 @@ warnings.simplefilter("ignore", category=DeprecationWarning)
 import telnetlib
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 import time
 import argparse
@@ -30,6 +31,7 @@ def shell(host, cs):
     tn = AtomTelnet(host)
     for s in tn.exec(cs)[1:-1]:
         print(s)
+    tn.exit()
 
 def sync_clock(host):
     """ATOM Camのクロックとホスト側のクロックに合わせる。
@@ -42,6 +44,7 @@ def sync_clock(host):
             break
     cs = 'date -s "{}"'.format(q.strftime("%Y-%m-%d %H:%M:%S"))
     print('# ' + tn.exec(cs)[1])
+    tn.exit()
 
 def comp_clock(host):
     """ATOM Camのクロックとホスト側のクロックの比較。
@@ -65,6 +68,7 @@ def comp_clock(host):
     print("# ATOM Cam =", atom_now)
     print("# HOST PC  =", host_now)
     print("# ATOM Cam - Host PC = {:.3f} sec".format(delta))
+    tn.exit()
 
 class AtomTelnet():
     '''
@@ -75,13 +79,17 @@ class AtomTelnet():
         Args:
           ip_address: Telnet接続先のIPアドレス
         """
-        self.tn = telnetlib.Telnet(ip_address)
-        self.tn.read_until(b"login: ")
-        self.tn.write(ATOM_CAM_USER.encode('ascii') + b"\n")
-        self.tn.read_until(b"Password: ")
-        self.tn.write(ATOM_CAM_PASS.encode('ascii') + b"\n")
+        try:
+            self.tn = telnetlib.Telnet(ip_address)
+            self.tn.read_until(b"login: ")
+            self.tn.write(ATOM_CAM_USER.encode('ascii') + b"\n")
+            self.tn.read_until(b"Password: ")
+            self.tn.write(ATOM_CAM_PASS.encode('ascii') + b"\n")
 
-        self.tn.read_until(b"# ")
+            self.tn.read_until(b"# ")
+        except Exception as e:
+            es = ip_address + ": " + str(e)
+            raise Exception(es)
 
     def exec(self, command):
         """Telnet経由でコマンドを実行する。
@@ -99,7 +107,12 @@ class AtomTelnet():
         self.tn.write("exit".encode('utf-8') + b"\n")
 
     def __del__(self):
-        self.exit()
+        pass
+        # self.exit()
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"{str(e)}", file=sys.stderr)
+        sys.exit(1)
