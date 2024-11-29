@@ -172,7 +172,7 @@ class MeteorDetect:
                         self.save_frames(td, accmframes)
                         # 航空機・稲光判定には累積フレームを用いる
                     td = None
-                accmframes = self.pre_capture(frames, 0.2)
+                accmframes = self.pre_capture(frames, 0.5)
                 exposure_ = exposure
         print("# {} stop".format(self.datetime_str(t)))
 
