@@ -115,7 +115,7 @@ class MeteorDetect:
             r, frame = self._capture.read()
             if not r: # EOF or lost connection
                 break
-            self.image_queue.put((t, frame))
+            self.image_queue.put((t, False, frame))
 
             if self.isfile:
                 t = self.basetime + self.elapsed_time()
@@ -123,7 +123,7 @@ class MeteorDetect:
                 t = datetime.now(tz)
                 if self.time_to and self.time_to < t:
                     break
-        self.image_queue.put(None)
+        self.image_queue.put((t, True, None))
 
     # ファイル先頭からの経過時間
     def elapsed_time(self):
@@ -139,10 +139,9 @@ class MeteorDetect:
         exposure_ = exposure
         while True:
             # キューから exposure_ 秒分のフレームを取り出す
-            tf = self.dequeue_frames(exposure_)
-            if tf is None:
+            (t, eod, frames) = self.dequeue_frames(exposure_)
+            if eod is True:
                 break
-            (t, frames) = tf
             accmframes += frames
 
             if t == self.basetime:
@@ -207,17 +206,15 @@ class MeteorDetect:
             if chr(cv.waitKey(1) & 0xFF) == 'q' or self._interrupted:
                 raise KeyboardInterrupt
 
-            tf = self.image_queue.get()
-            # キューから None (EOF) がでてきたら検出終了
-            if tf == None:
-                return None
-            (tt, frame) = tf
+            (tt, eod, frame) = self.image_queue.get()
+            if eod is True: # 検出終了
+                return (tt, True, None)
             if n == 0:
                 t = tt
             if self.opencl:
                 frame = cv.UMat(frame)
             frames.append(frame)
-        return (t, frames)
+        return (t, False, frames)
 
     def clear_queue(self):
         while not self.image_queue.empty():
