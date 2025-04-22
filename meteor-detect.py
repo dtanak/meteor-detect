@@ -141,14 +141,9 @@ class MeteorDetect:
 
             if t == self.basetime:
                 print("# {} start".format(self.datetime_str(t)))
-                if self.debug and self.mask is not None:
-                    self.save_image(self.mask, self.timename(t) + "_m.png")
 
             if self.show_window:
                 self.show_image(frames)
-
-            if not self.isfile:
-                self.monitor_sky(t, frames)
 
             lines = self.detect_meteor_lines(frames, min_length, sigma)
             if lines is not None:
@@ -306,16 +301,6 @@ class MeteorDetect:
         if mask is None:
             return i
         return cv.addWeighted(i, 1.0, mask, 0.2, 1.0)
-
-    # 毎正時のスカイモニター
-    def monitor_sky(self, t, frames):
-        if not 'prev_monitored_time' in vars(self):
-            self.prev_monitored_time = t
-        if self.prev_monitored_time.hour == t.hour:
-            return
-        self.prev_monitored_time = t
-        aimage = average(frames, self.opencl)
-        self.save_image(aimage, self.timename(t) + "_s.jpg")
 
     # OpenCVで画像・動画を保存: opencv-pythonはエラー処理系がほぼザル
     def save_image(self, cimage, path):
