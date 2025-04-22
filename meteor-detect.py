@@ -19,7 +19,6 @@ class MeteorDetect:
         self.show_window = False
         self.output_dir = Path(".")
         self.nameformat = "%Y%m%d%H%M%S"
-        self.time_to = None
         self.basetime = None
         self.mask = None
         self.opencl = False
@@ -100,9 +99,6 @@ class MeteorDetect:
     def queue_frames(self):
         tz = self.local_tz()
 
-        if self.time_to:
-            self.time_to = self.apply_tz(self.time_to, tz)
-
         if self.isfile:
             if self.basetime is None:
                 self.basetime = datetime.fromisoformat("0001-01-01T00:00:00")
@@ -121,8 +117,7 @@ class MeteorDetect:
                 t = self.basetime + self.elapsed_time()
             else:
                 t = datetime.now(tz)
-                if self.time_to and self.time_to < t:
-                    break
+
         self.image_queue.put((t, True, None))
 
     # ファイル先頭からの経過時間
@@ -493,7 +488,6 @@ if __name__ == '__main__':
         detector.show_window = a.show_window
         detector.output_dir = Path(a.output_dir)
         detector.nameformat = a.nameformat
-        detector.time_to = next_hhmm(a.time_to)
         if os.path.isfile(a.path):
             detector.basetime = find_datetime_in_metadata(a.path)
         if a.basetime:
@@ -528,8 +522,6 @@ if __name__ == '__main__':
                             help='try to re-connect when lost connection')
         parser.add_argument('--basetime', default=None,
                             help='(ファイルモードの)想定開始日時')
-        parser.add_argument('-t', '--time_to', default=None,
-                            help='終了時刻(JST) "hhmm" 形式(ex. 0600)')
         parser.add_argument('-o', '--output_dir', default=".",
                             help='検出画像の出力先ディレクトリ名')
         parser.add_argument(
@@ -649,17 +641,6 @@ if __name__ == '__main__':
             ep = (int(t[2]), int(t[3]))
             r.append((u[0], bp, ep))
         return r
-
-    # "HHMM" 形式を現在時刻以降の最初のdatetimeに変換
-    def next_hhmm(hhmm):
-        if hhmm is None:
-            return None
-        n = datetime.now()
-        t = datetime.strptime(hhmm, "%H%M")
-        t = datetime(n.year, n.month, n.day, t.hour, t.minute)
-        if t < n:
-            t += timedelta(hours=24)
-        return t
 
     try:
         main()
