@@ -58,3 +58,57 @@ optional arguments:
   --debug               debug mode
   --help                show this help message and exit
 ```
+
+* ファイル名を meteor-detect.py に変更しました。
+
+* 検出対象とするストリームURLまたはファイル名をオプションではなく
+positional argument として指定するようにしました。さらに、ATOM Cam を
+仮定した暗黙指定を廃止しました。
+
+```
+例)
+% meteor-detect rtsp://6199:4003@hostname/live
+```
+
+実行時には検出対象を必ず指定する必要があります。また、この変更に伴い
+-u, --url, --atomcam_tools オプションを削除しました。
+
+* --basetime オプションを新設し、ファイル解析モード時の開始時刻をコマ
+ンドラインで指定できるようにしました。動画ファイルからメタデータが取得
+できなかった場合に有効です。
+
+* -n, --nameformat オプションを新設し、出力ファイル名を strftime 形式
+で指定できるようにしました。
+
+* -m, --mask オプションを拡張し、マスク範囲を数値指定できるようにしま
+した。
+
+```
+例)
+% meteor-detect -m "-0,1000,80,1080" rtsp://6199:4003@hostname/live
+-> (0,1000)-(80,1080)で囲まれる矩形を検出除外領域とする。
+
+% meteor-detect -m "+12,12,1908,1068" rtsp://6199:4003@hostname/live
+-> (12,12)-(1908,1068)で囲まれる矩形を検出対象領域とする。
+
+% meteor-detect -m "atomcam" rtsp://6199:4003@hostname/live
+-> ATOM Camのデフォルト検出領域。
+```
+
+* -r, --re_connect オプションを新設し、コネクションが失われたときの再
+接続はオプション指定時のみに行うようにしました。
+
+* -n, --no_window オプションを論理反転し -w, --show_window オプション
+としました。
+
+* TERMシグナル受信時に検出を終了するようにしました。これにともな
+い、-t, --to オプションを削除しました。
+
+* ATOM Cam 由来の階層への一括アクセスを機能を削除しました。これに伴
+い、-d,--date -h,--hour, -m,--minute, -i,--input オプションを削除しま
+した。
+
+* --thread オプションを削除しました。
+
+* ATOM Cam の操作を目的とした -c, --clock オプションを削除しました。
+時計の同期機能は精度向上のうえ atomcam/atomsh.py に移動しました。
