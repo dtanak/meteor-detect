@@ -26,7 +26,8 @@ kin-hasegawa さんの流星検出ソフトウェア meteor-detect の実験的 
 
 ## コマンドラインの変更
 
-実験的機能の実装にあたり、一部機能の簡略化と分離をおこなっています。
+実験的機能の実装にあたり、一部機能の簡略化と分離をおこなっており、
+コマンドライン引数、オプションも若干変わっています。
 
 ```
 usage: meteor-detect.py [-w] [-r] [--basetime BASETIME] [-o OUTPUT_DIR]
