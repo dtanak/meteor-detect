@@ -130,7 +130,7 @@ class MeteorDetect:
 
     def detect_meteors(self, exposure, min_length, sigma):
         accmframes = [] # 流星出現直前からの累積フレーム
-        td = None  # 流星検出時刻。連続検出時は最初の検出時刻を保持。
+        td = None       # 流星検出時刻。
         exposure_ = exposure
         while True:
             # キューから exposure_ 秒分のフレームを取り出す
@@ -155,24 +155,28 @@ class MeteorDetect:
                 if td is None:
                     td = t
                     exposure_ = exposure * self.exposure_extension
-                    # 検出条件をゆるめて追跡(航空機判定のため)。
+                    # ひとたび線分を検出したら、exposure を延長することで
+                    # 条件を緩めて検出を継続する。
                 if self.debug:
                     self.dump_detected_lines(t, frames, lines)
             else:
                 if td is not None:
-                    if not self.possible_aircraft(td, accmframes) and \
-                       not self.possible_lightning(td, accmframes):
+                    # 線分の検出が途切れたら判定を行いフレームを保存。
+                    if self.possible_meteor(td, accmframes):
                         self.detection_log(td)
                         self.save_frames(td, accmframes)
-                        # 航空機・稲光判定には累積フレームを用いる
                     td = None
-                accmframes = self.pre_capture(frames, 0.5)
+                accmframes = self.precapture(frames, 0.5)
                 exposure_ = exposure
         print("# {} stop".format(self.datetime_str(t)))
 
-    # 航空機対策: 7秒以上連続しているものを航空機とみなす
-    # TODO: より丁寧な判定が必要。同時に流星も出現していたときに取り逃す。
-    # 流星雨のときに困る。出現位置をもとに連続性の判定を加えるか。
+    def possible_meteor(self, t, frames):
+        return not self.possible_aircraft(t, frames) and \
+            not self.possible_lightning(t, frames)
+
+    # 航空機判定: 7秒以上連続したものを航空機とみなす
+    # TODO: 航空機と同時に出現した流星を取り逃す。複数の流星の連続出現を
+    # 誤判定する可能性がある。出現位置をもとした連続性の判定を加えるか。
     def possible_aircraft(self, t, frames):
         s = len(frames) / self.FPS
         if 7.0 <= s:
@@ -181,8 +185,8 @@ class MeteorDetect:
             return True
         return False
 
-    # 稲光対策: 輝度230以上が画面の30パーセント以上あるものを稲光とみなす
-    # TODO: 世紀の大火球を取り逃すかもしれない。
+    # 稲光判定: 輝度230以上が画面の30パーセント以上あるものを稲光とみなす
+    # TODO: 稲光に匹敵するような大火球を取り逃す可能性がある。
     def possible_lightning(self, t, frames):
         cimage = lighten_composite(frames)
         r = brightness_rate(cimage, 230) * 100
@@ -221,7 +225,8 @@ class MeteorDetect:
         pimage = self.composite_mask_to_view(pimage, self.mask)
         cv.imshow('meteor-detect: {}'.format(self._path), pimage)
 
-    def pre_capture(self, frames, sec):
+    # プレキャプチャー: framesの最後からsec秒分のフレームを返す。
+    def precapture(self, frames, sec):
         n = len(frames)
         k = (int)(n - sec * self.FPS)
         if k < 0:
@@ -478,7 +483,7 @@ if __name__ == '__main__':
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
 
-        # YouTubeの場合、Full HDのビデオストリームURLを使用
+        # YouTubeの場合、FHDのビデオストリームURLを使用
         if "youtube" in a.path:
             a.path = get_youtube_stream(a.path, "video:mp4@1920x1080")
 
@@ -561,7 +566,7 @@ if __name__ == '__main__':
             for s in p.stderr.split("\n"):
                 if "creation_time" in s:
                     ts = re.sub('.*creation_time *: *', '', s)
-                    # Python 3.9は"Z" timezoneで例外発生
+                    # "Z" timezone は Python 3.9 がパースできない。
                     ts = ts.replace('Z', '+00:00')
                     return datetime.fromisoformat(ts)
         except:
@@ -573,7 +578,6 @@ if __name__ == '__main__':
         try:
             import apafy as pafy
         except Exception:
-            # pafyを使う場合はpacheが必要。
             import pafy
 
         print(f"# connecting to YouTube: {u}")
