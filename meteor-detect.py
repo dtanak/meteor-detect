@@ -460,11 +460,6 @@ if __name__ == '__main__':
     def main():
         a = parse_arguments()
 
-        if a.suppress_warning:
-            # stderrを dev/null に出力する。
-            fd = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(fd, 2)
-
         # 行毎に標準出力のバッファをflushする。
         sys.stdout.reconfigure(line_buffering=True)
 
@@ -487,15 +482,15 @@ if __name__ == '__main__':
             detector.user_interrupt()
         signal.signal(signal.SIGTERM, signal_receptor)
 
-        while True:
-            if detector.connect():
-                # 接続先のフレームサイズをもとにマスク画像を生成
-                detector.mask = make_exclusion_mask(a.mask, detector.size())
-                detector.start(a.exposure, a.min_length, a.sigma)
-            if not a.re_connect or detector.isfile:
-                break
-            # re_connect オプション指定時5秒スリープ後に再接続
-            time.sleep(5)
+        # ソースへの接続
+        if not detector.connect():
+            sys.exit(1)
+
+        # 接続先のフレームサイズをもとにマスク画像を生成
+        detector.mask = make_exclusion_mask(a.mask, detector.size())
+
+        # 検出開始(接続断後の再接続はしない)
+        detector.start(a.exposure, a.min_length, a.sigma)
 
     def parse_arguments():
         parser = argparse.ArgumentParser(add_help=False)
@@ -506,37 +501,40 @@ if __name__ == '__main__':
         parser.add_argument('path', help='stream URL or movie filename')
 
         # options:
-        parser.add_argument('-w', '--show_window', action='store_true',
-                            help='画面表示')
-        parser.add_argument('-r', '--re_connect', action='store_true',
-                            help='try to re-connect when lost connection')
-        parser.add_argument('--basetime', default=None,
-                            help='(ファイルモードの)想定開始日時')
-        parser.add_argument('-o', '--output_dir', default=".",
-                            help='検出画像の出力先ディレクトリ名')
+        parser.add_argument(
+            '-w', '--show_window', action='store_true',
+            help='show monitoring window')
+        parser.add_argument(
+            '-o', '--output_dir', default=".",
+            help='output directory')
+        parser.add_argument(
+            '-d', '--datetime', default=None,
+            help='date and time in file detection mode (ISO format)')
         parser.add_argument(
             '-n', '--nameformat', default="%Y%m%d%H%M%S",
-            help="format string for output filenames in strftime format")
+            help="format string that specifies the output filename")
         parser.add_argument(
-            '-m', '--mask', default=None, help="exclusion mask")
-        parser.add_argument('-e', '--exposure', type=float,
-                            default=1, help='露出時間(second)')
-        parser.add_argument('--min_length', type=int, default=15,
-                            help="minLineLength of HoghLinesP")
-        parser.add_argument('--sigma', type=float, default=0.0,
-                            help="sigma parameter of GaussianBlur()")
+            '-e', '--exposure', type=float, default=1,
+            help='exposure time (in second)')
         parser.add_argument(
-            '--opencl', action='store_true', help="Use OpenCL (default: False)")
-
-        # ffmpeg関係の警告がウザいので抑制する。
+            '-l', '--min_length', type=int, default=15,
+            help="minimum length parameter to HoughLinesP()")
         parser.add_argument(
-            '-s', '--suppress-warning', action='store_true',
-            help='suppress warning messages')
+            '-s', '--sigma', type=float, default=0.0,
+            help="sigma parameter to GaussianBlur()")
+        parser.add_argument(
+            '-m', '--mask', default=None,
+            help="exclusion mask")
 
         parser.add_argument(
-            '--debug', action='store_true', help='debug mode')
-        parser.add_argument('--help', action='help',
-                            help='show this help message and exit')
+            '--opencl', action='store_true',
+            help="use OpenCL")
+        parser.add_argument(
+            '--debug', action='store_true',
+            help='debug mode')
+        parser.add_argument(
+            '--help', action='help',
+            help='show this help message and exit')
 
         return parser.parse_args()
 
