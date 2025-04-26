@@ -19,7 +19,7 @@ class MeteorDetect:
         self.show_window = False
         self.output_dir = Path(".")
         self.nameformat = "%Y%m%d%H%M%S"
-        self.basetime = None
+        self.datetime = None
         self.mask = None
         self.opencl = False
         self.debug = False
@@ -100,13 +100,13 @@ class MeteorDetect:
         tz = self.local_tz()
 
         if self.isfile:
-            if self.basetime is None:
-                self.basetime = datetime.fromisoformat("0001-01-01T00:00:00")
-            self.basetime = self.apply_tz(self.basetime, tz)
+            if self.datetime is None:
+                self.datetime = datetime.fromisoformat("0001-01-01T00:00:00")
+            self.datetime = self.apply_tz(self.datetime, tz)
         else:
-            self.basetime = datetime.now(tz)
+            self.datetime = datetime.now(tz)
 
-        t = self.basetime
+        t = self.datetime
         while self._running_th:
             r, frame = self._capture.read()
             if not r: # EOF or lost connection
@@ -114,7 +114,7 @@ class MeteorDetect:
             self.image_queue.put((t, False, frame))
 
             if self.isfile:
-                t = self.basetime + self.elapsed_time()
+                t = self.datetime + self.elapsed_time()
             else:
                 t = datetime.now(tz)
 
@@ -139,7 +139,7 @@ class MeteorDetect:
                 break
             accmframes += frames
 
-            if t == self.basetime:
+            if t == self.datetime:
                 print("# {} start".format(self.datetime_str(t)))
 
             if self.show_window:
@@ -274,7 +274,7 @@ class MeteorDetect:
         ds = self.datetime_str(t)
         if self.isfile:
             # ファイル先頭からの経過時間を付与
-            et = (t - self.basetime).total_seconds()
+            et = (t - self.datetime).total_seconds()
             print('M {} {:8.3f}'.format(ds, et))
         else:
             # 接続先のURLを付与
@@ -474,9 +474,9 @@ if __name__ == '__main__':
         detector.output_dir = Path(a.output_dir)
         detector.nameformat = a.nameformat
         if os.path.isfile(a.path):
-            detector.basetime = find_datetime_in_metadata(a.path)
-        if a.basetime:
-            detector.basetime = datetime.fromisoformat(a.basetime)
+            detector.datetime = find_datetime_in_metadata(a.path)
+        if a.datetime:
+            detector.datetime = datetime.fromisoformat(a.datetime)
 
         def signal_receptor(signum, frame):
             detector.user_interrupt()
